@@ -886,7 +886,9 @@ balls[i+1].pathT - balls[i].pathT > minSpacing
 
 Gaps arise from two sources:
 1. **Spawn gaps** — the spawner emits balls at intervals; newly spawned balls
-   have not yet pushed into contact with the rest of the chain.
+   have not yet pushed into contact with the rest of the chain. These are
+   uncommon in practice but are treated identically to pop gaps — Case 2
+   applies if the balls on either side happen to be the same color.
 2. **Pop gaps** — when a group is removed, the front segment is no longer in
    contact with the back segment and becomes stationary.
 
@@ -904,7 +906,8 @@ segment.
 After every state change (insertion, pop, movement tick), every gap in the
 chain is checked. If the balls on **either side** of a gap are the same color,
 the gap triggers a close — the **front segment rushes backward** at
-`gapCloseSpeed` to meet the back segment, identical to Case 1.
+`gapCloseSpeed` to meet the back segment, identical to Case 1. This applies
+to all gap types including spawn gaps.
 
 This check runs across **all gaps** every tick while any gap-close is in
 progress, not just the most recently created gap.
@@ -912,14 +915,19 @@ progress, not just the most recently created gap.
 #### Front segment zip-back
 
 When a gap-close triggers, the front segment moves **backward** (decreasing
-`pathT`) at `gapCloseSpeed`. This is the "zip back" the player sees — the
-leading balls visibly pulling away from the skull toward the spawn side. This
-is the primary moment of relief after a successful shot.
+`pathT`) at `gapCloseSpeed` — a fixed constant, always the same speed
+regardless of chain speed, level, or gap size. This is the "zip back" the
+player sees — the leading balls visibly pulling away from the skull toward the
+spawn side. This is the primary moment of relief after a successful shot.
+
+`gapCloseSpeed` is much faster than `pushSpeed` to feel snappy. Suggested
+default: `gapCloseSpeed = 8 × pushSpeed` (tunable per level via `gapCloseSpeed`
+field in level JSON).
 
 ```
 gapClose tick():
   frontSegmentHead.pathT -= gapCloseSpeed * dt
-  // propagate backward through front segment (push all front balls back together)
+  // propagate backward through front segment (maintain minSpacing between all balls)
   for each ball in front segment (head → tail direction):
     maintain minSpacing from ball ahead
 ```
@@ -931,22 +939,23 @@ When the front segment's tail ball reaches `minSpacing` of the back segment's
 head ball, the gap is closed. The front segment stops its backward motion and
 resumes being pushed forward at `pushSpeed` by the back segment.
 
-#### Post-close match check
+**No minimum distance from skull** — zip-back applies even when the front
+segment is very close to `pathT=1.0`. The front segment zips back as far as
+needed to meet the back segment, even if it starts adjacent to the skull.
 
-When a gap fully closes, `MatchSystem` immediately checks the newly adjacent
-ball pair. If they match and together with neighbors form a group of 3+, that
-group pops — opening a new gap — and the process repeats.
-
-This is the **cascade**: each pop creates a gap, the front segment zips back,
-closes against the back segment, a new match is checked, another pop may occur.
-Cascades terminate when a gap closes and the newly adjacent balls do not form
-a 3+ group.
+**Reverse power-up interaction** — zip-back still applies when Reverse is
+active. If a gap-close triggers during Reverse, the front segment zips back
+at `gapCloseSpeed` regardless of the chain's current direction. Both motions
+are additive: the front segment moves backward both from the Reverse effect
+and from the zip-back simultaneously.
 
 #### Multiple simultaneous gaps
 
-Multiple gaps can exist simultaneously (e.g. natural spawn gaps plus a pop gap).
-Each is tracked independently. Each closing gap has its own front segment
-zipping backward. A segment can only be part of one gap-close at a time.
+Multiple gaps can exist and close simultaneously. Each gap-close is tracked
+independently — each has its own front segment zipping backward at
+`gapCloseSpeed`. A ball segment can only belong to one gap-close at a time.
+If a segment is already zipping and a second gap-close triggers on the same
+segment, the new close takes over (resets the zip).
 
 ```typescript
 interface GapCloseState {
