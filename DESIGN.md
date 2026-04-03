@@ -969,22 +969,72 @@ interface GapCloseState {
 
 ### 12.7 Chain Insertion Algorithm
 
-1. Find the nearest ball in the chain to the collision point (Euclidean screen
-   distance).
-2. Determine insert side (`before` or `after`) based on which side of that
-   ball's center the projectile is travelling from, relative to the path
-   direction at that point.
-3. Insert the new ball into the array at the computed index with `pathT` set
-   to the average of its new neighbors' `pathT` values.
-4. Re-run the minimum-spacing constraint across the insertion neighborhood to
-   push adjacent balls apart if needed.
-5. Run `MatchSystem.checkAt(insertIndex)`: scan left and right for consecutive
-   same-color balls including the inserted ball.
-6. If count ≥ 3 → mark group for removal → score → create gap → trigger
-   gap-close (Case 1).
-7. After insertion, run the full gap color-match scan across the entire chain
-   (Case 2) in case the insertion created a same-color match across an existing
-   gap elsewhere.
+#### Step 1 — Find the hit ball
+
+The projectile is a moving circle. Each tick, test it against every ball in
+every chain. The **first ball whose circle overlaps the projectile circle** is
+the hit ball.
+
+#### Step 2 — Determine insert side (before or after the hit ball)
+
+**Primary rule:** Project the projectile's velocity vector onto the path tangent
+at the hit ball's `pathT`.
+
+- Dot product **> 0** (projectile travelling in same direction as chain, spawn→skull)
+  → insert **before** the hit ball (between hit ball and skull).
+- Dot product **< 0** (projectile coming from skull side)
+  → insert **after** the hit ball (between hit ball and spawn).
+
+**Fallback (dot product ≈ 0, near-perpendicular hit):** Use nearest neighbor.
+Whichever of the hit ball's two neighbors is physically closer to the collision
+point — insert between the hit ball and that neighbor.
+
+```
+SPAWN ──── [A] ──── [HIT] ──── [B] ──── SKULL
+
+Projectile from spawn side  →  insert between HIT and B  (before HIT)
+Projectile from skull side  →  insert between A and HIT  (after HIT)
+Near-perpendicular          →  insert toward nearest neighbor
+```
+
+#### Step 3 — Insert and push forward
+
+The inserted ball takes the `pathT` of the hit ball. The hit ball and the
+**entire front segment ahead of it** (toward skull) are shifted forward by
+`minSpacing` to make room.
+
+```
+Before:  ... [A] ──── [HIT] ──── [C] ──── [D=head] ──── SKULL
+
+After:   ... [A] ──── [NEW] ──── [HIT] ──── [C] ──── [D=head] ──── SKULL
+                           all shifted → toward skull
+```
+
+**Critical rule: balls never move toward the spawn point from insertion.**
+The back segment (spawn side of the insertion point) is completely untouched.
+Balls only ever move toward spawn via zip-back or the Reverse power-up — never
+from insertion.
+
+**Skull danger:** if shifting the front segment forward pushes the head ball to
+`pathT >= 1.0`, the skull condition triggers immediately — a game over results.
+Careless insertion near the skull is punished.
+
+The push propagates through the **entire front segment** — every ball from the
+hit ball to the head is shifted by `minSpacing`. It stops at any gap, since
+balls beyond a gap are not in contact.
+
+#### Step 4 — Match check
+
+Immediately after insertion, `MatchSystem` scans outward from the inserted
+ball's index in both directions, counting consecutive same-color balls
+(including the inserted ball).
+
+- Count **≥ 3** → group pops → gap opens → zip-back triggers (Case 1).
+- Count **< 3** → no pop. Run full-chain gap color-match scan (Case 2) in case
+  the insertion created a same-color match across an existing gap elsewhere.
+
+The match check is synchronous — it happens in the same tick as the insertion,
+with no delay.
 
 ---
 
