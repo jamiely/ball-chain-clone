@@ -2,7 +2,7 @@
 
 **Project:** ball-chain-clone  
 **Reference Game:** Zuma Deluxe (PopCap Games, 2003)  
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Date:** 2026-04-03
 
 ---
@@ -21,8 +21,10 @@
 10. [Progression System](#10-progression-system)
 11. [Audio / Visual Style](#11-audio--visual-style)
 12. [Technical Architecture](#12-technical-architecture)
-13. [Milestones](#13-milestones)
-14. [Open Questions](#14-open-questions)
+13. [Testing Strategy](#13-testing-strategy)
+14. [Debug Mode](#14-debug-mode)
+15. [Milestones](#15-milestones)
+16. [Open Questions](#16-open-questions)
 
 ---
 
@@ -406,51 +408,96 @@ All audio can be implemented via Web Audio API with OGG / MP3 fallback.
 | Language | TypeScript | Type safety, good IDE support |
 | Renderer | Three.js (WebGL) | Hardware-accelerated 2D via orthographic camera; built-in sprite, texture, and scene-graph support |
 | Build tool | Vite | Fast HMR, simple config; Three.js tree-shakes well |
-| Testing | Vitest | Co-located with Vite |
+| Unit testing | Vitest | Co-located with Vite; fast, native ESM |
+| Coverage | Vitest + V8 provider | Target ≥ 90% line/branch coverage on all logic modules |
+| E2E testing | Playwright | Cross-browser, headless; tests major gameplay flows |
 | Physics engine | None | All motion is path-driven (no free-body simulation needed) |
 | Asset pipeline | SVG sources → PNG textures via build script | Crisp at all resolutions, scriptable, version-controllable |
 
 ### 12.2 Module Breakdown
 
+**Architectural rule: game logic must have zero Three.js / DOM dependencies.**
+Only `Renderer`, `InputManager`, and `SpriteSheet` are allowed to import Three.js
+or reference browser globals. Every other module is a pure TypeScript class or
+function that can be imported directly in Vitest without a DOM environment.
+
 ```
 src/
-├── main.ts               # Entry point, canvas setup, game loop
-├── Game.ts               # Top-level state machine (menu / playing / paused / gameover)
-├── scenes/
-│   ├── MenuScene.ts
-│   ├── GameScene.ts      # Core gameplay
-│   └── GameOverScene.ts
-├── entities/
-│   ├── Frog.ts           # Shooter entity
-│   ├── Ball.ts           # Single ball data + render
-│   ├── BallChain.ts      # Ordered chain, insertion, pop, cascade logic
-│   ├── Projectile.ts     # In-flight ball
-│   └── Skull.ts          # End-of-path danger object
-├── systems/
-│   ├── PathSystem.ts     # Bézier / polyline, arc-length parameterization
-│   ├── CollisionSystem.ts# Projectile ↔ chain hit detection
-│   ├── MatchSystem.ts    # 3+ match detection, cascade resolution
-│   ├── ScoreSystem.ts    # All scoring rules
-│   └── PowerUpSystem.ts  # Power-up activation / timer management
+├── main.ts                    # Entry point — wires logic + renderer + input
+├── GameLoop.ts                # Deterministic tick engine (see §12.6)
+├── Game.ts                    # Top-level state machine (menu/playing/paused/gameover)
+│
+├── logic/                     # Pure game logic — NO Three.js, NO DOM
+│   ├── BallChain.ts           # Ordered chain: movement, insertion, pop, cascade
+│   ├── Ball.ts                # Ball value type (color, pathT, powerUp)
+│   ├── MatchSystem.ts         # 3+ match detection, cascade resolution
+│   ├── ScoreSystem.ts         # All scoring rules, chain/combo/gap bonuses
+│   ├── PathSystem.ts          # Bézier/polyline, arc-length parameterization
+│   ├── CollisionSystem.ts     # Projectile ↔ chain hit detection
+│   ├── PowerUpSystem.ts       # Power-up activation and timer management
+│   ├── SpawnSystem.ts         # Ball spawning schedule
+│   ├── FrogState.ts           # Frog rotation, current/next ball state
+│   ├── ProjectileState.ts     # In-flight ball position/velocity
+│   └── SkullState.ts          # Path-end state and open-amount calculation
+│
+├── renderer/                  # All Three.js code — never imported by logic/
+│   ├── Renderer.ts            # Three.js WebGLRenderer, orthographic camera, scene
+│   ├── ChainRenderer.ts       # Syncs BallChain state → Three.js meshes
+│   ├── FrogRenderer.ts        # Frog mesh, rotation animation
+│   ├── SkullRenderer.ts       # Skull mesh, open-state animation
+│   ├── HUDRenderer.ts         # Score, lives, Zuma bar overlays
+│   └── ParticleRenderer.ts    # Pop particle effects
+│
 ├── input/
-│   └── InputManager.ts   # Mouse, touch, keyboard unified
+│   └── InputManager.ts        # Mouse, touch, keyboard → normalized InputState
+│
 ├── audio/
-│   └── AudioManager.ts   # Web Audio API wrapper
+│   └── AudioManager.ts        # Web Audio API wrapper
+│
 ├── sprites/
-│   ├── SpriteSheet.ts    # Loads spritesheet PNG + JSON atlas, drawSprite() helper
-│   └── SpriteAtlas.ts    # Type definitions for atlas manifest
+│   ├── SpriteSheet.ts         # THREE.Texture atlas loader + createMesh()
+│   └── SpriteAtlas.ts         # Atlas manifest type definitions
+│
+├── debug/
+│   ├── DebugOverlay.ts        # On-screen panel (see §14)
+│   ├── DebugConfig.ts         # Runtime-editable settings store
+│   └── StepController.ts     # Pause/step/advance controls for game loop
+│
 ├── data/
-│   └── levels/           # Level JSON files (one per level)
+│   └── levels/
 │       ├── 1-1.json
-│       ├── 1-2.json
 │       └── ...
-├── ui/
-│   ├── HUD.ts            # Score, lives, Zuma bar
-│   └── LevelComplete.ts
+│
 └── utils/
-    ├── Vec2.ts           # 2D vector math
-    ├── BezierUtils.ts    # Curve sampling, arc-length LUT
-    └── Random.ts         # Seeded RNG
+    ├── Vec2.ts
+    ├── BezierUtils.ts
+    └── Random.ts              # Seeded, replaceable RNG (critical for test replay)
+
+tests/
+├── unit/                      # Vitest — pure logic tests, no DOM
+│   ├── logic/
+│   │   ├── BallChain.test.ts
+│   │   ├── MatchSystem.test.ts
+│   │   ├── ScoreSystem.test.ts
+│   │   ├── PathSystem.test.ts
+│   │   ├── CollisionSystem.test.ts
+│   │   ├── PowerUpSystem.test.ts
+│   │   ├── SpawnSystem.test.ts
+│   │   └── FrogState.test.ts
+│   └── utils/
+│       ├── Vec2.test.ts
+│       └── BezierUtils.test.ts
+│
+├── integration/               # Vitest — multi-system scenarios, headless
+│   ├── GameLoop.test.ts       # Step-through simulation tests (see §13.3)
+│   └── LevelCompletion.test.ts
+│
+└── e2e/                       # Playwright
+    ├── gameplay.spec.ts       # Fire ball, match, score update
+    ├── powerups.spec.ts       # Each power-up activates and applies correctly
+    ├── skull.spec.ts          # Ball reaches skull → life lost
+    ├── levelcomplete.spec.ts  # Chain cleared → level complete screen
+    └── debug.spec.ts          # Debug panel opens, settings take effect
 ```
 
 ### 12.3 Sprite Pipeline
@@ -602,52 +649,291 @@ normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
 
 ### 12.6 Game Loop
 
+The loop is split into two independent concerns: **simulation** (pure, deterministic)
+and **rendering** (Three.js, side-effectful). This separation makes every logic
+path unit-testable without a browser.
+
+#### GameLoop.ts — the tick engine
+
+```typescript
+interface TickInput {
+  aimAngle: number;       // radians from frog to pointer
+  fire: boolean;          // true for exactly one tick when fire button pressed
+  swap: boolean;          // true for exactly one tick when swap pressed
+}
+
+interface GameState {
+  chain: BallChain;
+  frog: FrogState;
+  projectile: ProjectileState | null;
+  score: ScoreState;
+  powerUps: ActivePowerUp[];
+  skull: SkullState;
+  rng: Random;            // seeded — same seed == same game
+  tickCount: number;
+}
+
+class GameLoop {
+  // Advance the simulation by exactly `dt` milliseconds.
+  // Has NO side effects outside of returning the new state.
+  tick(state: GameState, input: TickInput, dt: number): GameState { ... }
+
+  // Step exactly one fixed tick (FIXED_DT = 16.67ms).
+  // Used by tests and the debug StepController.
+  step(state: GameState, input: TickInput): GameState {
+    return this.tick(state, input, FIXED_DT);
+  }
+}
+```
+
+- `tick()` is a **pure function** (no global state, no DOM).
+- All randomness flows through `state.rng` (seeded `Random`), so any game
+  can be replayed deterministically from `(seed, inputLog)`.
+- The RAF loop calls `tick()` with real `dt`; tests call `step()` with a fixed dt.
+
+#### Browser RAF loop (`main.ts`)
+
 ```
 requestAnimationFrame loop:
-  dt = clamp(now - lastTime, 0, 50ms)   // cap dt to avoid spiral of death
-  
-  InputManager.poll()
-  
-  if state == PLAYING:
-    BallChain.update(dt)      // advance pathT of all balls
-    Projectile.update(dt)     // move in-flight balls
-    CollisionSystem.check()   // projectile ↔ chain
-    SpawnSystem.update(dt)    // add new balls to chain head
-    PowerUpSystem.update(dt)  // tick timers
-    SkullSystem.check()       // leading ball pathT >= 1.0?
-    ScoreSystem.flush()       // commit pending score events
-  
-  // Three.js handles the render call:
-  renderer.render(scene, camera)
+  dt = clamp(now - lastTime, 0, 50ms)     // cap to avoid spiral of death
+
+  if !debugConfig.paused:
+    input   = InputManager.poll()
+    state   = gameLoop.tick(state, input, dt)
+
+  renderer.sync(state)                     // write state → Three.js meshes
+  renderer.render()                        // three.js renderer.render(scene, cam)
+  debugOverlay.draw(state)                 // no-op unless debug mode enabled
 ```
 
 ---
 
-## 13. Milestones
+## 13. Testing Strategy
+
+### 13.1 Philosophy
+
+- **Logic first, render never.** All game rules live in `src/logic/` with zero
+  Three.js or DOM dependencies. Any unit test can import and exercise them without
+  a browser environment.
+- **Tests encode the rules.** Each mechanic in §2–§8 of this document has a
+  corresponding test. If a rule isn't tested, it isn't implemented.
+- **Coverage gate: ≥ 90% lines and branches** on all files under `src/logic/`
+  and `src/utils/`. Enforced in CI; PRs fail if coverage drops below threshold.
+- **Deterministic replay.** The seeded `Random` class and pure `GameLoop.tick()`
+  mean any test can reproduce an exact game sequence by supplying a seed and
+  input log.
+
+### 13.2 Unit Tests (Vitest)
+
+Each `logic/` module has a co-located test file in `tests/unit/logic/`. Tests
+cover every public method and every branch condition.
+
+**Representative test cases per module:**
+
+| Module | Key test cases |
+|---|---|
+| `BallChain` | Insert ball at head/middle/tail; correct pathT ordering maintained; gap closes after pop; speed ramp applied correctly |
+| `MatchSystem` | 3-match pops; 2-match doesn't pop; cascade after gap close; cascade terminates when no new match; single-color chain cleared entirely |
+| `ScoreSystem` | Base 10 pts/ball; chain bonus formula at n=1,10,20; combo multiplier per cascade level; gap shot multiplier; ace time bonus; extra life thresholds |
+| `PathSystem` | Arc-length LUT monotonically increasing; `tFromArcLength` round-trips; position at t=0 == path start; position at t=1 == path end; uniform speed despite curvature |
+| `CollisionSystem` | Direct hit registers; near-miss doesn't register; insertion index correct for front/back of nearest ball; two-chain level targets correct chain |
+| `PowerUpSystem` | Each power-up activates on pop; effect applied; timer expires correctly; multiple simultaneous power-ups each expire independently |
+| `SpawnSystem` | Balls spawn at correct interval; correct color distribution; spawn stops after `chainLength` balls |
+| `FrogState` | `aimAngle` updated from input; fire produces projectile with correct velocity; swap exchanges current/next; next ball replaced after fire |
+
+### 13.3 Integration / Step-Through Tests (Vitest)
+
+`tests/integration/GameLoop.test.ts` drives the full simulation headlessly using
+`GameLoop.step()`. These tests verify multi-system interactions that can't be
+checked by unit-testing a single module.
+
+**Pattern:**
+
+```typescript
+it("clears a 3-ball chain in 1 shot", () => {
+  const state = buildState({
+    chain: [ball("red"), ball("red"), ball("red")],
+    frog: { currentBall: ball("red"), aimAngle: angleToChain },
+    seed: 42,
+  });
+
+  let s = state;
+  s = gameLoop.step(s, { fire: true, swap: false, aimAngle: s.frog.aimAngle });
+  // advance enough ticks for projectile to travel and collide
+  for (let i = 0; i < 30; i++) s = gameLoop.step(s, noInput);
+
+  expect(s.chain.balls).toHaveLength(0);
+  expect(s.score.total).toBe(30 + 200); // 3×10 + chain bonus at n=1
+});
+```
+
+**Key step-through scenarios:**
+
+- Single shot clears 3-ball chain; score correct.
+- Shot inserts into middle; no match; chain continues.
+- Cascade: popping group A creates gap → group B match → second pop.
+- Power-up embedded in chain; popping the group activates it.
+- Skull reached: life decremented, state reset to level start.
+- Full level: all balls cleared → `state.phase == "levelComplete"`.
+- Seeded replay: same `(seed, inputLog)` produces identical final `state`.
+
+### 13.4 End-to-End Tests (Playwright)
+
+Playwright tests run the built app in a headless Chromium browser. They drive
+input via mouse events and assert on visible DOM/canvas state (or data attributes
+written by the renderer for testability).
+
+**Test files:**
+
+| File | Scenarios covered |
+|---|---|
+| `gameplay.spec.ts` | Page loads; frog visible; click fires ball; score increments on match |
+| `powerups.spec.ts` | Each of the 7 power-ups appears in chain, is collected, effect visible |
+| `skull.spec.ts` | Letting chain reach skull loses a life; HUD life count decrements |
+| `levelcomplete.spec.ts` | Clearing the chain shows level-complete overlay |
+| `debug.spec.ts` | `?debug=1` URL param shows debug panel; speed slider changes chain speed |
+
+**Testability hooks for Playwright:**
+
+The renderer writes key game state to `data-*` attributes on the canvas wrapper:
+
+```html
+<div id="game-root"
+  data-score="1240"
+  data-lives="3"
+  data-phase="playing"
+  data-chain-length="14">
+  <canvas id="game-canvas"></canvas>
+</div>
+```
+
+Playwright assertions use these instead of pixel-sniffing:
+
+```typescript
+await expect(page.locator("#game-root")).toHaveAttribute("data-lives", "2");
+```
+
+### 13.5 Coverage Configuration
+
+`vitest.config.ts`:
+```typescript
+coverage: {
+  provider: "v8",
+  include: ["src/logic/**", "src/utils/**"],
+  exclude: ["src/renderer/**", "src/debug/**", "src/sprites/**"],
+  thresholds: {
+    lines: 90,
+    branches: 90,
+    functions: 90,
+  },
+  reportsDirectory: "coverage",
+}
+```
+
+---
+
+## 14. Debug Mode
+
+Debug mode is activated by the URL parameter `?debug=1` or by pressing
+`` ` `` (backtick) at runtime. It adds an on-screen panel and enables
+step-through controls without affecting the production build.
+
+### 14.1 Debug Panel (`DebugOverlay.ts`)
+
+A semi-transparent HTML overlay (positioned over the canvas) with:
+
+| Control | Type | Effect |
+|---|---|---|
+| **Pause / Resume** | Button | Freezes `GameLoop.tick()` |
+| **Step** | Button | Advances exactly one tick (`FIXED_DT`) while paused |
+| **Step N** | Number + Button | Advances N ticks in one click |
+| **Chain speed** | Slider (0.1× – 5×) | Multiplies `baseSpeed` at runtime |
+| **Spawn interval** | Slider (100ms – 5000ms) | Overrides level spawn rate |
+| **Ball colors** | Checkboxes | Restrict active color set |
+| **Force power-up** | Dropdown + Button | Injects chosen power-up into next ball |
+| **God mode** | Checkbox | Skull never triggers game over |
+| **Show path** | Checkbox | Renders the Bézier path curve |
+| **Show pathT** | Checkbox | Renders each ball's `pathT` value as text |
+| **Show hitboxes** | Checkbox | Renders collision radii |
+| **Seed** | Text input | Set `state.rng` seed; restart level to take effect |
+| **Export state** | Button | Copies `JSON.stringify(state)` to clipboard |
+| **Import state** | Button | Paste JSON to restore exact game state |
+
+### 14.2 Step Controller (`StepController.ts`)
+
+When paused, every call to the RAF loop skips `gameLoop.tick()` unless a step
+was requested. The renderer still runs each frame so the canvas stays live.
+
+```typescript
+class StepController {
+  paused = false;
+  private pendingSteps = 0;
+
+  requestStep(n = 1): void { this.pendingSteps += n; }
+
+  // Called by main.ts each RAF frame instead of tick() directly
+  maybeTick(state: GameState, input: TickInput): GameState {
+    if (!this.paused) return gameLoop.tick(state, input, realDt);
+    if (this.pendingSteps > 0) {
+      this.pendingSteps--;
+      return gameLoop.step(state, input);
+    }
+    return state;  // frozen
+  }
+}
+```
+
+### 14.3 DebugConfig (`DebugConfig.ts`)
+
+A singleton store of all runtime-overridable values. Systems read from it when
+the value is set, falling back to the level JSON default otherwise.
+
+```typescript
+interface DebugConfig {
+  enabled: boolean;
+  paused: boolean;
+  speedMultiplier: number | null;
+  spawnInterval: number | null;
+  restrictColors: BallColor[] | null;
+  godMode: boolean;
+  showPath: boolean;
+  showPathT: boolean;
+  showHitboxes: boolean;
+  forcedPowerUp: PowerUpType | null;
+}
+```
+
+Debug mode is excluded from production bundles via Vite's `import.meta.env.DEV`
+guard — the `debug/` modules tree-shake out entirely in production builds.
+
+---
+
+## 15. Milestones
 
 | Milestone | Deliverables |
 |---|---|
 **MVP goal: one fully playable level with complete gameplay mechanics and polished art.**
-Multi-level progression, Gauntlet mode, and audio are post-MVP.
+Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced from M2 onward.
 
 | Milestone | Deliverables | MVP? |
 |---|---|---|
-| **M0 — Scaffold** | Vite + TypeScript + Three.js project, orthographic scene, game loop, mouse + touch InputManager, SVG sprite pipeline + build script | Yes |
-| **M1 — Art Assets** | All SVG sprites: 6 ball colors, 7 power-up icons, frog (idle + shoot), skull (5 states), background, UI icons; spritesheet generated | Yes |
-| **M2 — Path & Chain** | PathSystem (Bézier, arc-length LUT), BallChain (movement, spawn, speed ramp), Three.js mesh rendering via spritesheet | Yes |
-| **M3 — Shooter** | Frog mesh, aim rotation toward pointer/touch, projectile firing, ball swapping | Yes |
-| **M4 — Matching** | Collision detection, insertion algorithm, 3+ match detection, cascade logic | Yes |
-| **M5 — Scoring & HUD** | Base score, chain bonus, combo bonus, gap shot bonus, HUD (score, lives, Zuma bar) | Yes |
-| **M6 — Win/Lose** | Skull mechanic + animation, level complete screen, game over screen, life loss / retry | Yes |
-| **M7 — Power-Ups** | All 7 power-up types, chain embedding, activation effects | Yes |
-| **M8 — Polish (MVP)** | Particle effects on pops, camera shake on skull hit, responsive canvas scaling, mobile QA | Yes |
-| **M9 — Multi-Level** | Level JSON format, 13+ level definitions, stage progression, save state | Post-MVP |
-| **M10 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
-| **M11 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
+| **M0 — Scaffold** | Vite + TypeScript + Three.js, orthographic scene, deterministic `GameLoop`, seeded `Random`, mouse + touch `InputManager`, Vitest + Playwright configured, CI coverage check | Yes |
+| **M1 — Art Assets** | All SVG assets (6 balls, 7 power-ups, frog, skull ×5, bg, UI icons); Three.js asset loading pipeline | Yes |
+| **M2 — Path & Chain** | `PathSystem` (Bézier, arc-length LUT) + unit tests; `BallChain` (movement, spawn, speed ramp) + unit tests; chain rendered in Three.js | Yes |
+| **M3 — Shooter** | `FrogState` + unit tests; `ProjectileState` + unit tests; `CollisionSystem` + unit tests; frog mesh + aim rotation | Yes |
+| **M4 — Matching** | `MatchSystem` (3+ match, cascade) + unit tests; step-through integration tests for single-shot clear and cascade scenarios | Yes |
+| **M5 — Scoring & HUD** | `ScoreSystem` (all bonus types) + unit tests; HUD renderer (score, lives, Zuma bar) | Yes |
+| **M6 — Win/Lose** | `SkullState` + unit tests; skull animation; level-complete and game-over screens; life loss / retry flow + integration tests | Yes |
+| **M7 — Power-Ups** | `PowerUpSystem` (all 7 types) + unit tests; chain embedding; activation effects; integration tests for each power-up | Yes |
+| **M8 — Debug Mode** | `DebugOverlay`, `StepController`, `DebugConfig`; all debug controls functional; Playwright `debug.spec.ts` | Yes |
+| **M9 — E2E & Polish** | Full Playwright suite; particle effects; camera shake; responsive canvas; mobile QA; coverage report ≥ 90% confirmed | Yes |
+| **M10 — Multi-Level** | Level JSON format, 13+ levels, stage progression, save state | Post-MVP |
+| **M11 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
+| **M12 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
 
 ---
 
-## 14. Open Questions
+## 16. Open Questions
 
 1. **Art assets:** SVG sprites authored in-project, rasterized to a spritesheet at
    build time. All entities render via `SpriteSheet.draw()`. (Resolved.)
