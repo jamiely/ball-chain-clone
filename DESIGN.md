@@ -33,8 +33,8 @@ frog idol that rotates 360° and fires colored balls into a moving chain of ball
 Matching 3+ consecutive same-color balls removes them from the chain. The goal is
 to clear the chain before any ball reaches the skull at the path end.
 
-**Target platform:** Web browser (HTML5 Canvas)  
-**Proposed tech stack:** TypeScript + HTML5 Canvas (no heavy framework)  
+**Target platform:** Web browser (WebGL via Three.js)  
+**Proposed tech stack:** TypeScript + Three.js (no physics engine)  
 **Target audience:** Casual players familiar with match-3 / marble-shooter genres
 
 ---
@@ -404,10 +404,11 @@ All audio can be implemented via Web Audio API with OGG / MP3 fallback.
 | Layer | Choice | Rationale |
 |---|---|---|
 | Language | TypeScript | Type safety, good IDE support |
-| Renderer | HTML5 Canvas 2D | No dependencies, sufficient for 2D arcade game |
-| Build tool | Vite | Fast HMR, simple config |
+| Renderer | Three.js (WebGL) | Hardware-accelerated 2D via orthographic camera; built-in sprite, texture, and scene-graph support |
+| Build tool | Vite | Fast HMR, simple config; Three.js tree-shakes well |
 | Testing | Vitest | Co-located with Vite |
-| Asset pipeline | Static files in `/public` | Simple, no CMS needed |
+| Physics engine | None | All motion is path-driven (no free-body simulation needed) |
+| Asset pipeline | SVG sources → PNG textures via build script | Crisp at all resolutions, scriptable, version-controllable |
 
 ### 12.2 Module Breakdown
 
@@ -435,6 +436,9 @@ src/
 │   └── InputManager.ts   # Mouse, touch, keyboard unified
 ├── audio/
 │   └── AudioManager.ts   # Web Audio API wrapper
+├── sprites/
+│   ├── SpriteSheet.ts    # Loads spritesheet PNG + JSON atlas, drawSprite() helper
+│   └── SpriteAtlas.ts    # Type definitions for atlas manifest
 ├── data/
 │   └── levels/           # Level JSON files (one per level)
 │       ├── 1-1.json
@@ -449,7 +453,122 @@ src/
     └── Random.ts         # Seeded RNG
 ```
 
-### 12.3 Path Representation
+### 12.3 Sprite Pipeline
+
+All visual assets are authored as SVG and rasterized to a single PNG spritesheet
+at build time. The Canvas renderer draws from this spritesheet exclusively —
+no raw SVG is rendered at runtime.
+
+#### Source SVG layout
+
+```
+assets/
+└── sprites/
+    ├── balls/
+    │   ├── ball-red.svg
+    │   ├── ball-green.svg
+    │   ├── ball-blue.svg
+    │   ├── ball-yellow.svg
+    │   ├── ball-purple.svg
+    │   └── ball-white.svg
+    ├── powerups/
+    │   ├── powerup-slow.svg
+    │   ├── powerup-reverse.svg
+    │   ├── powerup-lightning.svg
+    │   ├── powerup-laser.svg
+    │   ├── powerup-bomb.svg
+    │   ├── powerup-accuracy.svg
+    │   └── powerup-colorchange.svg
+    ├── frog/
+    │   ├── frog-idle.svg
+    │   └── frog-shoot.svg       # 1-frame shoot pose
+    ├── skull/
+    │   ├── skull-closed.svg
+    │   ├── skull-quarter.svg
+    │   ├── skull-half.svg
+    │   ├── skull-open.svg
+    │   └── skull-full.svg
+    ├── ui/
+    │   ├── life-icon.svg
+    │   ├── zumabar-fill.svg
+    │   └── zumabar-bg.svg
+    └── bg/
+        └── temple-bg.svg        # Tileable or full-scene background
+```
+
+#### Build script (`scripts/build-sprites.ts`)
+
+Uses the `sharp` npm package (or `resvg-js`) to:
+
+1. Render each SVG at a configurable base resolution (default: 2× for HiDPI).
+2. Pack all rendered PNGs into a single `public/spritesheet.png` using a
+   simple bin-packing algorithm (or `spritesmith`).
+3. Emit `public/spritesheet.json` — a TexturePacker-compatible atlas manifest:
+
+```json
+{
+  "frames": {
+    "ball-red": { "frame": { "x": 0,  "y": 0,  "w": 64, "h": 64 } },
+    "ball-green": { "frame": { "x": 64, "y": 0,  "w": 64, "h": 64 } },
+    "frog-idle":  { "frame": { "x": 0,  "y": 64, "w": 96, "h": 96 } }
+  },
+  "meta": {
+    "image": "spritesheet.png",
+    "size": { "w": 512, "h": 512 },
+    "scale": 2
+  }
+}
+```
+
+4. Script runs as a Vite plugin hook (`buildStart`) so `vite build` and
+   `vite dev` both regenerate the sheet when SVGs change.
+
+#### Runtime usage with Three.js (`SpriteSheet.ts`)
+
+The spritesheet PNG is loaded once as a `THREE.Texture`. For each named frame,
+a `THREE.MeshBasicMaterial` is created with the shared texture and a UV offset /
+repeat that maps to that frame's region. Each game object owns a
+`THREE.Mesh` (with `PlaneGeometry`) or a `THREE.Sprite`, updated each frame by
+setting its `position` and `rotation` in world space.
+
+```typescript
+class SpriteSheet {
+  private texture: THREE.Texture;
+  private atlas: Atlas;
+
+  async load(atlasUrl: string): Promise<void> { ... }
+
+  // Returns a material configured for the named frame.
+  // Caller owns the Mesh; call updateUVs() if the sprite frame changes.
+  createMaterial(name: string): THREE.MeshBasicMaterial { ... }
+
+  // Create a ready-to-add Mesh for a named sprite.
+  createMesh(name: string): THREE.Mesh { ... }
+}
+```
+
+- All ball, frog, skull, and UI objects are `THREE.Mesh` nodes in a single
+  orthographic scene.
+- The camera is a `THREE.OrthographicCamera` sized to the logical canvas
+  resolution (e.g. 960 × 540), so world units == pixels.
+- No perspective; z-ordering is handled by `mesh.renderOrder` or `mesh.position.z`.
+- No physics engine is used — ball positions are computed entirely from path
+  parameterization (`pathT`) and chain logic, then written directly to
+  `mesh.position`.
+
+#### SVG design conventions
+
+- Balls: 64 × 64 px viewBox, circular with Aztec/Mayan glyph overlay, stone
+  texture achieved with SVG filters (`feTurbulence` + `feComposite`).
+- Frog: 96 × 96 px viewBox, top-down view, mouth pointing right (rotation
+  applied at runtime).
+- Skull: 80 × 80 px viewBox, 5 frames covering open states (closed → fully open).
+- All SVGs use a consistent earthy palette (see §11.2).
+- No external fonts or linked resources inside SVGs (fully self-contained).
+
+---
+
+### 12.4 Path Representation
 
 Paths are stored as a flat array of points with a `type` flag per segment:
 
@@ -469,7 +588,7 @@ interface LevelPath {
 `PathSystem.tFromArcLength(len)` maps a physical distance along the path to the
 normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
 
-### 12.4 Chain Insertion Algorithm
+### 12.5 Chain Insertion Algorithm
 
 1. Find nearest ball in chain to collision point (Euclidean distance).
 2. Determine whether inserted ball goes before or after nearest ball based on
@@ -481,7 +600,7 @@ normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
 6. After removal, close gap: advance chain segment behind gap to meet chain
    segment ahead. Check if new neighbors match → cascade.
 
-### 12.5 Game Loop
+### 12.6 Game Loop
 
 ```
 requestAnimationFrame loop:
@@ -498,13 +617,8 @@ requestAnimationFrame loop:
     SkullSystem.check()       // leading ball pathT >= 1.0?
     ScoreSystem.flush()       // commit pending score events
   
-  Renderer.clear()
-  Renderer.drawBackground()
-  Renderer.drawPath()
-  Renderer.drawChain()
-  Renderer.drawProjectile()
-  Renderer.drawFrog()
-  Renderer.drawHUD()
+  // Three.js handles the render call:
+  renderer.render(scene, camera)
 ```
 
 ---
@@ -513,27 +627,32 @@ requestAnimationFrame loop:
 
 | Milestone | Deliverables |
 |---|---|
-| **M0 — Scaffold** | Vite + TypeScript project, Canvas setup, game loop, input handling |
-| **M1 — Path & Chain** | PathSystem with arc-length parameterization, BallChain rendering and movement |
-| **M2 — Shooter** | Frog rendering, aim rotation, projectile firing, ball swapping |
-| **M3 — Matching** | Collision detection, insertion algorithm, 3+ match detection and removal, cascade logic |
-| **M4 — Scoring & HUD** | Score system (base, chain, combo, gap shot), HUD display, lives system |
-| **M5 — Win/Lose** | Skull mechanic, level complete flow, game over screen, restart |
-| **M6 — Power-Ups** | All 7 power-up types, embedded in chain, activation logic |
-| **M7 — Levels** | Level JSON format, 13+ level definitions covering Stages 1–4 |
-| **M8 — Game Modes** | Adventure save/load, Gauntlet mode with Practice + Survival, rank system |
-| **M9 — Audio/Visual** | Canvas art (stone theme), BGM loop, SFX, Zuma vocal cue |
-| **M10 — Polish** | Particle effects on pops, smooth interpolation, mobile touch support, perf tuning |
+**MVP goal: one fully playable level with complete gameplay mechanics and polished art.**
+Multi-level progression, Gauntlet mode, and audio are post-MVP.
+
+| Milestone | Deliverables | MVP? |
+|---|---|---|
+| **M0 — Scaffold** | Vite + TypeScript + Three.js project, orthographic scene, game loop, mouse + touch InputManager, SVG sprite pipeline + build script | Yes |
+| **M1 — Art Assets** | All SVG sprites: 6 ball colors, 7 power-up icons, frog (idle + shoot), skull (5 states), background, UI icons; spritesheet generated | Yes |
+| **M2 — Path & Chain** | PathSystem (Bézier, arc-length LUT), BallChain (movement, spawn, speed ramp), Three.js mesh rendering via spritesheet | Yes |
+| **M3 — Shooter** | Frog mesh, aim rotation toward pointer/touch, projectile firing, ball swapping | Yes |
+| **M4 — Matching** | Collision detection, insertion algorithm, 3+ match detection, cascade logic | Yes |
+| **M5 — Scoring & HUD** | Base score, chain bonus, combo bonus, gap shot bonus, HUD (score, lives, Zuma bar) | Yes |
+| **M6 — Win/Lose** | Skull mechanic + animation, level complete screen, game over screen, life loss / retry | Yes |
+| **M7 — Power-Ups** | All 7 power-up types, chain embedding, activation effects | Yes |
+| **M8 — Polish (MVP)** | Particle effects on pops, camera shake on skull hit, responsive canvas scaling, mobile QA | Yes |
+| **M9 — Multi-Level** | Level JSON format, 13+ level definitions, stage progression, save state | Post-MVP |
+| **M10 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
+| **M11 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
 
 ---
 
 ## 14. Open Questions
 
-1. **Art assets:** Create original vector art, use placeholder colored circles, or
-   commission/find CC-licensed sprites? Suggest starting with colored circles and
-   adding art in M9.
+1. **Art assets:** SVG sprites authored in-project, rasterized to a spritesheet at
+   build time. All entities render via `SpriteSheet.draw()`. (Resolved.)
 
-2. **Mobile support priority:** Full touch support or desktop-first?
+2. **Mobile support priority:** Full touch support is in scope. Touch controls implemented in M0 (`InputManager`) and tested throughout. Three.js renders to a `<canvas>` element which works natively on mobile. (Resolved.)
 
 3. **Dual-track implementation:** Should both chains share a single `BallChain`
    manager or have two independent instances? (Recommend two instances.)
@@ -552,3 +671,9 @@ requestAnimationFrame loop:
 
 8. **License / naming:** Avoid "Zuma" in the final product name to prevent
    trademark issues. Current repo name "ball-chain-clone" works as a codename.
+
+9. **Physics engine:** All ball motion is path-driven so a physics engine is not
+   needed for core gameplay. Potential use cases if added later: projectile
+   ricochets, particle debris on pop, environmental elements. Candidates if
+   needed: Rapier (Rust/WASM, excellent perf) or Matter.js (pure JS, simpler).
+   Current plan: no physics engine. (To discuss.)
