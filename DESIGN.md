@@ -815,19 +815,149 @@ interface HitResult {
 other chains. `ChainManager` is the only place multi-chain logic lives, keeping
 both classes easy to test independently.
 
-### 12.6 Chain Insertion Algorithm
+### 12.6 Chain Movement Model
 
-1. Find nearest ball in chain to collision point (Euclidean distance).
-2. Determine whether inserted ball goes before or after nearest ball based on
-   which side of the ball the projectile came from along the path direction.
-3. Insert ball into chain array at computed index.
-4. Run `MatchSystem.checkMatches(insertionIndex)`: scan left and right from
-   insertion point for consecutive same-color balls.
-5. If count ≥ 3, mark group for removal, compute score, schedule cascade check.
-6. After removal, close gap: advance chain segment behind gap to meet chain
-   segment ahead. Check if new neighbors match → cascade.
+#### Ball representation
 
-### 12.6 Game Loop
+Each ball is an independent object with its own `pathT` (normalized position
+along the path, 0.0 = spawn point, 1.0 = skull). Balls do not share a single
+speed value — they each move at whatever speed the ball in front allows.
+
+```typescript
+interface Ball {
+  color: BallColor;
+  pathT: number;        // current position along path
+  powerUp: PowerUpType | null;
+}
+```
+
+The chain array is always kept sorted by `pathT` descending (index 0 = leading
+ball closest to skull, last index = tail ball closest to spawn).
+
+#### Push-from-back movement
+
+Each tick the spawner pushes the tail ball forward by `pushSpeed * dt`. Each
+ball in turn pushes the ball in front if the gap between them drops below
+`minSpacing` (= 1 ball diameter in path units). This propagates forward through
+the chain — compressed segments all move at `pushSpeed`, while free-floating
+front segments continue at their own last speed.
+
+```
+tick():
+  tail.pathT += pushSpeed * dt
+
+  for i from lastIndex-1 down to 0:
+    gap = balls[i].pathT - balls[i+1].pathT
+    if gap < minSpacing:
+      balls[i].pathT = balls[i+1].pathT + minSpacing
+```
+
+This means:
+- A segment with no gap behind it moves at `pushSpeed`.
+- A segment that has been separated from the back (by a gap) **continues
+  moving forward at whatever speed it was already travelling** — it does not
+  slow down or stop. It is now a free-floating segment.
+- Multiple free-floating segments can exist simultaneously, each moving
+  independently at their own speed.
+
+**Open question for discussion:** what speed does a free-floating front segment
+travel at after it separates? Options:
+- Same `pushSpeed` as the back (it just keeps its current speed)
+- Slightly faster than `pushSpeed` (floats away from the back)
+- Decelerates slightly (gravity-like drag toward the skull)
+
+#### Gap definition
+
+A gap exists between balls `i` and `i+1` when:
+
+```
+balls[i].pathT - balls[i+1].pathT > minSpacing
+```
+
+Gaps arise from two sources:
+1. **Natural spawn gaps** — the spawner emits balls at intervals, so newly
+   spawned balls have not yet compressed into the back of the existing chain.
+2. **Pop gaps** — when a group is removed, the front segment separates from
+   the back segment.
+
+#### Gap close rules
+
+A gap closes in exactly **two** cases:
+
+**Case 1 — Pop.**
+When a group of 3+ same-color balls is removed, the back segment behind the
+gap rushes forward to fill it. The back segment's `pushSpeed` is temporarily
+set to `gapCloseSpeed` (a fast constant, much higher than normal `pushSpeed`)
+until the gap is fully closed (spacing returns to `minSpacing`).
+
+**Case 2 — Color match across a gap.**
+After every state change (insertion, pop, ball movement tick), every gap in the
+chain is checked. If the balls on either side of a gap are the same color, the
+gap closes — the back segment rushes forward at `gapCloseSpeed` exactly as in
+Case 1.
+
+This check runs on **all gaps**, not just the most recently created one, and
+runs **every tick** while any gap-close is in progress.
+
+#### Cascade mechanics
+
+Gap-close Case 2 is what produces cascades:
+
+1. Group A pops → gap opens between front and back segment.
+2. Back segment rushes forward (Case 1).
+3. When back segment reaches front segment, the newly adjacent balls are
+   checked for color match.
+4. If they match → they join an existing color group → if that group now has
+   3+ → pop → new gap → back rushes forward again → repeat.
+
+Cascades terminate naturally when a gap closes and the newly adjacent balls do
+not form a 3+ group.
+
+#### Multiple simultaneous gaps
+
+Multiple gaps can exist and be closing simultaneously. Each gap tracks its own
+close state independently. The `pushSpeed` boost for a closing gap applies only
+to the segment **immediately behind that gap** — it does not cascade the speed
+boost further down the chain.
+
+```typescript
+interface Gap {
+  frontIndex: number;   // index of ball at front edge of gap
+  backIndex: number;    // index of ball at back edge of gap
+  closing: boolean;     // true = rushing to close
+}
+```
+
+#### Post-close match check
+
+When a gap fully closes (spacing reaches `minSpacing`), `MatchSystem` immediately
+checks the newly adjacent pair. This is the only time a match check is triggered
+by movement — all other match checks are triggered by insertions or pops.
+
+---
+
+### 12.7 Chain Insertion Algorithm
+
+1. Find the nearest ball in the chain to the collision point (Euclidean screen
+   distance).
+2. Determine insert side (`before` or `after`) based on which side of that
+   ball's center the projectile is travelling from, relative to the path
+   direction at that point.
+3. Insert the new ball into the array at the computed index with `pathT` set
+   to the average of its new neighbors' `pathT` values.
+4. Re-run the minimum-spacing constraint across the insertion neighborhood to
+   push adjacent balls apart if needed.
+5. Run `MatchSystem.checkAt(insertIndex)`: scan left and right for consecutive
+   same-color balls including the inserted ball.
+6. If count ≥ 3 → mark group for removal → score → create gap → trigger
+   gap-close (Case 1).
+7. After insertion, run the full gap color-match scan across the entire chain
+   (Case 2) in case the insertion created a same-color match across an existing
+   gap elsewhere.
+
+---
+
+### 12.8 Game Loop
 
 The loop is split into two independent concerns: **simulation** (pure, deterministic)
 and **rendering** (Three.js, side-effectful). This separation makes every logic
