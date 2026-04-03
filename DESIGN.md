@@ -190,21 +190,156 @@ either chain. Each chain has its own skull.
 
 ## 6. Power-Ups and Special Balls
 
-Power-up balls appear embedded in the chain with a glowing icon. Shooting any
-ball in the group containing a power-up collects it, but it only activates if
-the group pops (3+ match). Once activated, the effect applies immediately.
+### 6.1 Embedding and Activation
 
-| Power-Up | Visual | Effect | Duration |
-|---|---|---|---|
-| **Slow** | Hourglass / snail | Halves chain speed | 10 s |
-| **Reverse** | Arrows pointing back | Pushes chain backward | 8 s |
-| **Lightning** | Lightning bolt | Destroys all balls matching the shot color | Instant |
-| **Laser** | Laser beam | Next fired ball pierces the entire chain, popping every matching-color ball in its path | 1 shot |
-| **Bomb** | Explosion icon | Destroys 7-ball radius around impact | Instant |
-| **Accuracy** | Target reticle | Shows exact insertion point and outcome preview | 15 s |
-| **Color Change** | Paint swirl | Converts a nearby cluster to a single color (random or aimed) | Instant |
+Power-up balls are embedded directly in the chain as regular balls that also
+carry a `powerUp` tag. They look like normal colored balls but display a glowing
+icon overlay.
 
-Multiple power-ups can be active simultaneously. Their timers run independently.
+**Activation rules:**
+- A power-up activates **only** when its ball is part of a group of 3+ that pops.
+- If its group is destroyed by a cascade (not a direct shot), it still activates.
+- If its group has fewer than 3 of the same color and doesn't pop, the power-up
+  ball stays in the chain — it is never "collected" without a pop.
+- Only one power-up per chain group. Groups are never seeded with two power-ups.
+
+**Spawn rules:**
+- `powerUpFrequency` (per-level JSON field, default `0.08`) is the probability
+  that any given ball spawned into the chain carries a power-up.
+- The type is chosen uniformly at random from the enabled set for that level
+  (early stages may exclude Laser and Bomb).
+- A minimum gap of 8 balls is enforced between consecutive power-up balls so
+  they don't cluster.
+
+### 6.2 Power-Up Reference
+
+#### Slow
+
+| Field | Value |
+|---|---|
+| Duration | 10 s |
+| Target | The chain it was embedded in |
+| Effect | Multiplies that chain's current speed by `0.5` |
+| Stacking | A second Slow resets the 10 s timer; speed multiplier does not compound |
+| Expiry | Speed ramps back to normal over 1 s (linear interpolation) |
+
+#### Reverse
+
+| Field | Value |
+|---|---|
+| Duration | 8 s |
+| Target | The chain it was embedded in |
+| Effect | Inverts chain velocity — chain moves backward (away from skull) |
+| Stacking | A second Reverse resets the 8 s timer |
+| Interaction with Slow | Both can be active simultaneously. Reverse takes priority on direction; speed is still halved if Slow is also active |
+| Expiry | Chain resumes forward motion at normal speed immediately on expiry |
+| Multi-chain | Only the chain containing the power-up ball is affected |
+
+#### Lightning
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | All chains |
+| Effect | Removes every ball in every chain whose color matches the **fired projectile's color** at the moment of activation |
+| No-match case | If no balls of that color exist in any chain, the power-up is consumed with no effect (shows a visual flash but nothing pops) |
+| Score | Each removed ball scores 10 pts; chain bonus applies as if they were popped sequentially |
+| Cascade | After removal, gaps are closed normally — if closing a gap creates a 3+ match, cascade proceeds as usual |
+
+#### Laser
+
+| Field | Value |
+|---|---|
+| Duration | 1 shot |
+| Target | Whichever chain the next projectile hits |
+| Effect | The next fired ball travels through the entire chain along its flight path, popping every ball it passes through whose color matches the laser ball's color |
+| Non-matching balls | Passed through without effect; they remain in the chain |
+| Insertion | The laser ball is NOT inserted into the chain; it passes through completely |
+| Score | Each popped ball scores normally; gap-shot multiplier applies for each gap the ball passes through |
+| Expiry | If the player swaps balls after Laser activates, the Laser effect transfers to the new current ball |
+| Miss | If the next shot misses the chain entirely, the Laser effect is consumed and lost |
+
+#### Bomb
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | The chain it was embedded in |
+| Effect | Removes all balls within a radius of 7 ball-widths from the bomb ball's position at the moment of pop |
+| Radius measurement | Physical screen distance, not index count — curved paths mean the radius may affect non-contiguous index ranges |
+| Score | Each removed ball scores 10 pts + chain bonus |
+| Cascade | Gaps close after removal; new matches trigger cascade |
+| Multi-chain | Does NOT affect other chains, even if physically nearby |
+
+#### Accuracy
+
+| Field | Value |
+|---|---|
+| Duration | 15 s |
+| Target | Player UI |
+| Effect | Renders a preview line showing where the current projectile will land and which ball it will insert next to; also highlights the resulting color group size |
+| Visual | Dotted trajectory line from frog to insertion point; affected ball group outlined |
+| Stacking | A second Accuracy resets the 15 s timer |
+| No gameplay effect | Purely informational; does not change chain or score behavior |
+
+#### Color Change
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | A cluster of balls around the activation point |
+| Effect | Converts all balls within 5 ball-widths of the power-up ball's position to a single color |
+| Color chosen | The color of the ball that completed the 3+ match triggering the pop (the fired ball's color) |
+| Result | The converted cluster may immediately form a 3+ match with neighbors, triggering a cascade |
+| Multi-chain | Only affects the chain the power-up was embedded in |
+
+### 6.3 Simultaneous Power-Ups
+
+Multiple power-ups can be active at the same time. Rules for simultaneous effects:
+
+| Combination | Behavior |
+|---|---|
+| Slow + Reverse | Both active: chain moves backward at half speed |
+| Two Slows | Timer resets; speed multiplier stays at 0.5 (no compounding) |
+| Two Reverses | Timer resets; direction still reversed |
+| Slow + Lightning | Lightning pops its targets; Slow continues unaffected |
+| Any timed + Instant | Instant resolves immediately; timed continues ticking |
+
+### 6.4 PowerUpSystem Internals
+
+```typescript
+interface ActivePowerUp {
+  type: PowerUpType;
+  chainIndex: number;   // which chain it belongs to (-1 = global)
+  remainingMs: number;  // 0 for instant (already resolved)
+}
+
+class PowerUpSystem {
+  private active: ActivePowerUp[] = [];
+
+  // Called by ChainManager when a group containing a power-up pops.
+  activate(type: PowerUpType, chainIndex: number, context: ActivationContext): void;
+
+  // Called each tick. Decrements timers, removes expired effects, returns
+  // any speed/direction overrides for ChainManager to apply.
+  update(dt: number): PowerUpOverrides;
+}
+
+interface PowerUpOverrides {
+  // Per-chain speed multipliers (1.0 = normal)
+  speedMultipliers: number[];
+  // Per-chain direction (-1 = reversed, 1 = forward)
+  directions: number[];
+  // Whether Accuracy overlay should render
+  showAccuracy: boolean;
+  // Whether next projectile should be a Laser shot
+  laserArmed: boolean;
+}
+```
+
+`GameLoop.tick()` calls `PowerUpSystem.update(dt)` and passes the returned
+`PowerUpOverrides` into `ChainManager.update(dt, overrides)` so chain movement
+is adjusted without `ChainManager` knowing anything about power-up state directly.
 
 ---
 
