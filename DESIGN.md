@@ -14,17 +14,18 @@
 3. [Game Objects](#3-game-objects)
 4. [Controls](#4-controls)
 5. [Level Design](#5-level-design)
-6. [Power-Ups and Special Balls](#6-power-ups-and-special-balls)
-7. [Scoring System](#7-scoring-system)
-8. [Win / Lose Conditions](#8-win--lose-conditions)
-9. [Game Modes](#9-game-modes)
-10. [Progression System](#10-progression-system)
-11. [Audio / Visual Style](#11-audio--visual-style)
-12. [Technical Architecture](#12-technical-architecture)
-13. [Testing Strategy](#13-testing-strategy)
-14. [Debug Mode](#14-debug-mode)
-15. [Milestones](#15-milestones)
-16. [Open Questions](#16-open-questions)
+6. [Map Editor](#6-map-editor)
+7. [Power-Ups and Special Balls](#7-power-ups-and-special-balls)
+8. [Scoring System](#8-scoring-system)
+9. [Win / Lose Conditions](#9-win--lose-conditions)
+10. [Game Modes](#10-game-modes)
+11. [Progression System](#11-progression-system)
+12. [Audio / Visual Style](#12-audio--visual-style)
+13. [Technical Architecture](#13-technical-architecture)
+14. [Testing Strategy](#14-testing-strategy)
+15. [Debug Mode](#15-debug-mode)
+16. [Milestones](#16-milestones)
+17. [Open Questions](#17-open-questions)
 
 ---
 
@@ -190,19 +191,62 @@ chains accidentally; more colors = deliberate aim required.
 
 ### 5.1 Path System
 
-Paths are defined as a sequence of **cubic Bézier curve segments** or a
-**polyline** with smooth interpolation. At runtime the path is pre-sampled into
-an arc-length-parameterized lookup table so that balls travel at uniform screen
-speed regardless of curve curvature.
+Paths are authored as **waypoints** in the map editor and stored internally as
+a **series of cubic Bézier segments**. This gives authors an intuitive editing
+experience while giving the runtime a uniform, arbitrary-shape path representation.
 
-Each level JSON includes:
-- `path`: array of control points
-- `spawnInterval`: ms between new balls entering the chain
-- `chainLength`: total balls to spawn before the tail enters
-- `baseSpeed`: initial chain speed (path-units / second)
-- `speedAcceleration`: speed increase per second
-- `colors`: array of allowed colors for this level
-- `frogAnchor`: `{x, y}` position of frog on screen
+#### Authoring (map editor)
+
+- Author places `{x, y}` waypoints anywhere on screen.
+- By default each waypoint is auto-smoothed using **Catmull-Rom** interpolation
+  to generate Bézier control handles — no manual handle placement needed.
+- **Chord-length clamping** is applied automatically: control handles are clamped
+  to a maximum length proportional to the distance between neighboring waypoints.
+  This prevents overshooting, loops, and wild curves from closely-spaced or
+  sharp-angle waypoints.
+- Any waypoint can have its auto-generated handles **overridden manually** — the
+  author drags the handles to take full control of that segment. This is the
+  escape hatch for edge cases where auto-smoothing produces an undesirable shape.
+- The editor renders the resulting curve in **real time** as waypoints and handles
+  are moved, so authors see the exact ball path immediately.
+
+#### Storage (level JSON)
+
+The level JSON stores the **resolved Bézier segments**, not the raw waypoints.
+The editor writes segments; the runtime only ever reads segments. Waypoint
+metadata (handle override flags) is stored separately in an `editorData` block
+that the runtime ignores.
+
+```json
+{
+  "path": {
+    "segments": [
+      { "type": "cubic", "p0": [50,300], "p1": [120,100], "p2": [280,100], "p3": [350,300] },
+      { "type": "cubic", "p0": [350,300], "p1": [420,500], "p2": [580,500], "p3": [650,300] }
+    ]
+  },
+  "editorData": {
+    "waypoints": [
+      { "pos": [50,300], "handleOverride": false },
+      { "pos": [350,300], "handleOverride": false },
+      { "pos": [650,300], "handleOverride": false }
+    ]
+  },
+  "spawnPoint": [50, 300],
+  "frogAnchor": [400, 270],
+  "spawnInterval": 600,
+  "chainLength": 80,
+  "baseSpeed": 40,
+  "speedAcceleration": 0.5,
+  "colors": ["red", "green", "blue", "yellow"],
+  "powerUpFrequency": 0.08,
+  "aceTimeSeconds": 120,
+  "gapCloseSpeed": 320
+}
+```
+
+Note that `frogAnchor` and `spawnPoint` are **independent coordinates** —
+the frog can be anywhere on screen regardless of where the path starts.
 
 ### 5.2 Level Progression
 
@@ -226,7 +270,86 @@ either chain. Each chain has its own skull.
 
 ---
 
-## 6. Power-Ups and Special Balls
+## 6. Map Editor
+
+The map editor is a browser-based tool (served separately from the game) for
+creating and editing level JSON files. It is not part of the production game
+bundle.
+
+### 6.1 Editor Layout
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Toolbar: [ Add Waypoint ] [ Select ] [ Delete ]    │
+│           [ Frog ] [ Spawn ] [ Preview ] [ Export ] │
+├──────────────────────────────┬──────────────────────┤
+│                              │  Level Properties    │
+│                              │  ─────────────────   │
+│       Canvas (960×540)       │  chainLength: [80]   │
+│                              │  baseSpeed:   [40]   │
+│   Path drawn in real time    │  spawnInterval:[600] │
+│   Waypoints as drag handles  │  colors: [✓R✓G✓B✓Y] │
+│   Frog icon draggable        │  aceTime: [120]      │
+│   Spawn point draggable      │  gapCloseSpeed:[320] │
+│                              │  powerUpFreq: [0.08] │
+└──────────────────────────────┴──────────────────────┘
+```
+
+### 6.2 Waypoint Editing
+
+- **Add waypoint:** Click on the canvas to append a waypoint to the end of the
+  path. Shift-click inserts between existing waypoints.
+- **Move waypoint:** Drag any waypoint anchor to reposition it. The curve
+  updates in real time.
+- **Delete waypoint:** Select and press Delete, or right-click → Remove.
+- **Auto-smooth handles:** Each waypoint gets Catmull-Rom handles by default
+  with chord-length clamping. The curve preview updates immediately.
+- **Manual handle override:** Drag a handle away from its auto position to
+  override it. The waypoint is marked with a different visual indicator.
+  Double-click an overridden handle to revert to auto-smooth.
+- **Reorder waypoints:** Drag waypoints in the waypoint list panel to reorder
+  the path sequence.
+
+### 6.3 Special Point Placement
+
+- **Frog anchor:** A dedicated draggable icon (frog sprite) placed anywhere on
+  the canvas. Stored as `frogAnchor` in level JSON. Independent of the path.
+- **Spawn point:** A dedicated draggable icon placed anywhere on the canvas.
+  Stored as `spawnPoint`. Typically placed at the start of the path but not
+  required to be.
+
+### 6.4 Live Preview
+
+- Clicking **Preview** launches the game in a small embedded window running
+  the current level JSON. The author can play the level immediately without
+  exporting.
+- Preview mode supports the debug panel (§14) so the author can tweak
+  `baseSpeed`, `spawnInterval`, etc. in real time and see the effect.
+
+### 6.5 Export
+
+- **Export JSON:** Writes the resolved level JSON to a file download. The
+  `editorData` block (waypoints + handle override flags) is included so the
+  level can be re-imported and edited later.
+- **Import JSON:** Loads a previously exported level JSON back into the editor,
+  restoring all waypoints and handle overrides.
+- **Copy to clipboard:** Copies the JSON string directly for pasting into the
+  `data/levels/` directory.
+
+### 6.6 Technical Notes
+
+- The editor is a separate Vite entry point (`editor/main.ts`) sharing the
+  `PathSystem` and `BezierUtils` modules with the game.
+- No server required — purely client-side. Runs at `localhost:5174` (game at
+  `5173`).
+- The canvas uses the same logical resolution (960×540) as the game so
+  coordinates map 1:1.
+- `PathSystem.build()` runs live in the editor on every waypoint change,
+  giving the author an accurate arc-length-corrected curve preview.
+
+---
+
+## 7. Power-Ups and Special Balls
 
 ### 6.1 Embedding and Activation
 
@@ -381,7 +504,7 @@ is adjusted without `ChainManager` knowing anything about power-up state directl
 
 ---
 
-## 7. Scoring System
+## 8. Scoring System
 
 ### 7.1 Base Score
 
@@ -446,7 +569,7 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 8. Win / Lose Conditions
+## 9. Win / Lose Conditions
 
 ### 8.1 Win
 
@@ -477,7 +600,7 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 9. Game Modes
+## 10. Game Modes
 
 ### 9.1 Adventure Mode
 
@@ -508,7 +631,7 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 10. Progression System
+## 11. Progression System
 
 ### 10.1 Save State (localStorage)
 
@@ -537,7 +660,7 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 11. Audio / Visual Style
+## 12. Audio / Visual Style
 
 ### 11.1 Visual Theme
 
@@ -579,7 +702,7 @@ All audio can be implemented via Web Audio API with OGG / MP3 fallback.
 
 ---
 
-## 12. Technical Architecture
+## 13. Technical Architecture
 
 ### 12.1 Technology Stack
 
@@ -799,23 +922,73 @@ class SpriteSheet {
 
 ### 12.4 Path Representation
 
-Paths are stored as a flat array of points with a `type` flag per segment:
+#### Runtime types
+
+The runtime only knows about Bézier segments — waypoints and editor metadata
+are never loaded by the game.
 
 ```typescript
 type PathSegment =
-  | { type: "line"; p0: Vec2; p1: Vec2 }
+  | { type: "line";  p0: Vec2; p1: Vec2 }
   | { type: "cubic"; p0: Vec2; p1: Vec2; p2: Vec2; p3: Vec2 };
 
 interface LevelPath {
   segments: PathSegment[];
-  // Pre-computed at load time:
-  arcLengthLUT: { t: number; arcLen: number }[];
-  totalLength: number;
+  spawnPoint: Vec2;
+  // Pre-computed at load time by PathSystem.build():
+  arcLengthLUT: { segIndex: number; localT: number; arcLen: number }[];
+  totalLength: number;  // total arc length in pixels
 }
 ```
 
-`PathSystem.tFromArcLength(len)` maps a physical distance along the path to the
-normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
+#### Arc-length parameterization
+
+Bézier curves are not arc-length uniform — equal increments of the curve
+parameter `t` do not correspond to equal distances on screen. Without
+correction, balls speed up on straights and slow down on curves.
+
+`PathSystem.build()` solves this at level load time by pre-sampling each
+segment at `N` subdivisions and building an arc-length lookup table (LUT).
+Each LUT entry records the cumulative arc length at a specific `(segIndex,
+localT)` point on the curve.
+
+At runtime, moving a ball forward by `distance` pixels:
+
+```typescript
+// Convert current pathT to arc length
+currentArcLen = PathSystem.arcLenFromPathT(path, ball.pathT);
+
+// Advance by physical distance
+newArcLen = currentArcLen + distance;
+
+// Convert back to pathT via LUT (linear interpolation between entries)
+ball.pathT = PathSystem.pathTFromArcLen(path, newArcLen);
+```
+
+This ensures all balls travel at uniform screen speed regardless of curve shape.
+
+#### Screen position
+
+At render time, `PathSystem.positionAt(path, pathT)` evaluates the Bézier
+curve at the given parameter and returns `{x, y}` in screen coordinates.
+Balls never store screen positions — only `pathT`. Position is always derived.
+
+#### Authoring → runtime pipeline
+
+```
+Map editor
+  Author places waypoints
+  Auto-smoothing generates Bézier handles (Catmull-Rom + chord-length clamping)
+  Author optionally overrides handles manually
+  Live curve preview shown
+       ↓
+  Editor writes resolved segments to level JSON (editorData preserved separately)
+       ↓
+Runtime
+  PathSystem.load() reads segments array
+  PathSystem.build() computes arc-length LUT
+  Game loop uses pathT exclusively
+```
 
 ### 12.5 ChainManager API
 
@@ -1167,7 +1340,7 @@ requestAnimationFrame loop:
 
 ---
 
-## 13. Testing Strategy
+## 14. Testing Strategy
 
 ### 13.1 Philosophy
 
@@ -1291,7 +1464,7 @@ coverage: {
 
 ---
 
-## 14. Debug Mode
+## 15. Debug Mode
 
 Debug mode is activated by the URL parameter `?debug=1` or by pressing
 `` ` `` (backtick) at runtime. It adds an on-screen panel and enables
@@ -1367,7 +1540,7 @@ guard — the `debug/` modules tree-shake out entirely in production builds.
 
 ---
 
-## 15. Milestones
+## 16. Milestones
 
 | Milestone | Deliverables |
 |---|---|
@@ -1386,13 +1559,14 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
 | **M7 — Power-Ups** | `PowerUpSystem` (all 7 types) + unit tests; chain embedding; activation effects; integration tests for each power-up | Yes |
 | **M8 — Debug Mode** | `DebugOverlay`, `StepController`, `DebugConfig`; all debug controls functional; Playwright `debug.spec.ts` | Yes |
 | **M9 — E2E & Polish** | Full Playwright suite; particle effects; camera shake; responsive canvas; mobile QA; coverage report ≥ 90% confirmed | Yes |
-| **M10 — Multi-Level** | Level JSON format, 13+ levels, stage progression, save state | Post-MVP |
-| **M11 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
-| **M12 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
+| **M10 — Map Editor** | Separate Vite entry point; waypoint placement; auto-smooth with chord-length clamping; manual handle override; frog + spawn point placement; live preview with debug panel; export/import JSON | Post-MVP |
+| **M11 — Multi-Level** | 13+ levels authored in map editor, stage progression, save state | Post-MVP |
+| **M12 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
+| **M13 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
 
 ---
 
-## 16. Open Questions
+## 17. Open Questions
 
 1. **Art assets:** SVG sprites authored in-project, rasterized to a spritesheet at
    build time. All entities render via `SpriteSheet.draw()`. (Resolved.)
