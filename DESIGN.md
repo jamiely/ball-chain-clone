@@ -428,7 +428,8 @@ src/
 ├── Game.ts                    # Top-level state machine (menu/playing/paused/gameover)
 │
 ├── logic/                     # Pure game logic — NO Three.js, NO DOM
-│   ├── BallChain.ts           # Ordered chain: movement, insertion, pop, cascade
+│   ├── ChainManager.ts        # Owns all BallChain instances for a level; collision dispatch, all-cleared check
+│   ├── BallChain.ts           # Single chain: movement, insertion, pop, cascade
 │   ├── Ball.ts                # Ball value type (color, pathT, powerUp)
 │   ├── MatchSystem.ts         # 3+ match detection, cascade resolution
 │   ├── ScoreSystem.ts         # All scoring rules, chain/combo/gap bonuses
@@ -476,6 +477,7 @@ src/
 tests/
 ├── unit/                      # Vitest — pure logic tests, no DOM
 │   ├── logic/
+│   │   ├── ChainManager.test.ts
 │   │   ├── BallChain.test.ts
 │   │   ├── MatchSystem.test.ts
 │   │   ├── ScoreSystem.test.ts
@@ -635,7 +637,50 @@ interface LevelPath {
 `PathSystem.tFromArcLength(len)` maps a physical distance along the path to the
 normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
 
-### 12.5 Chain Insertion Algorithm
+### 12.5 ChainManager API
+
+`ChainManager` is the sole interface the rest of the game uses for anything
+chain-related. It owns 1–2 `BallChain` instances depending on the level definition
+and routes all calls to the correct one.
+
+```typescript
+class ChainManager {
+  private chains: BallChain[];
+
+  constructor(paths: LevelPath[], rng: Random) { ... }
+
+  // Advance all chains by dt milliseconds.
+  update(dt: number): void;
+
+  // Test a projectile against all chains. Returns the hit chain + insertion
+  // index, or null if no hit. GameLoop calls this; never calls BallChain directly.
+  checkCollision(projectile: ProjectileState): HitResult | null;
+
+  // Insert a ball into the chain identified by the HitResult.
+  insert(hit: HitResult, ball: Ball): void;
+
+  // True when every chain has been fully cleared.
+  allCleared(): boolean;
+
+  // The leading ball's pathT across all chains (used for skull animation).
+  maxPathT(): number;
+
+  // Apply a power-up effect to the relevant chain(s).
+  applyPowerUp(effect: PowerUpEffect): void;
+}
+
+interface HitResult {
+  chainIndex: number;   // which chain was hit
+  insertIndex: number;  // position within that chain's ball array
+  side: "before" | "after";
+}
+```
+
+`BallChain` itself remains a single-responsibility class with no knowledge of
+other chains. `ChainManager` is the only place multi-chain logic lives, keeping
+both classes easy to test independently.
+
+### 12.6 Chain Insertion Algorithm
 
 1. Find nearest ball in chain to collision point (Euclidean distance).
 2. Determine whether inserted ball goes before or after nearest ball based on
@@ -663,7 +708,7 @@ interface TickInput {
 }
 
 interface GameState {
-  chain: BallChain;
+  chains: ChainManager;
   frog: FrogState;
   projectile: ProjectileState | null;
   score: ScoreState;
@@ -940,8 +985,10 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
 
 2. **Mobile support priority:** Full touch support is in scope. Touch controls implemented in M0 (`InputManager`) and tested throughout. Three.js renders to a `<canvas>` element which works natively on mobile. (Resolved.)
 
-3. **Dual-track implementation:** Should both chains share a single `BallChain`
-   manager or have two independent instances? (Recommend two instances.)
+3. **Dual-track implementation:** `ChainManager` owns all `BallChain` instances
+   for a level and is the sole interface for collision dispatch, insertion, power-up
+   application, and all-cleared checks. `BallChain` stays single-responsibility.
+   (Resolved — see §12.5.)
 
 4. **Difficulty balancing:** Exact `baseSpeed` and `spawnInterval` values need
    empirical playtesting — initial numbers in level JSONs are estimates.
