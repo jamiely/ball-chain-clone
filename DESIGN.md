@@ -272,86 +272,105 @@ either chain. Each chain has its own skull.
 
 ## 6. Map Editor
 
-The map editor is a browser-based tool (served separately from the game) for
-creating and editing level JSON files. It is not part of the production game
-bundle.
+The map editor is integrated into the game and accessible from the main menu.
+It is available in all builds. Custom levels are stored in IndexedDB and appear
+in the Play menu under a **Custom Levels** section.
 
-### 6.1 Editor Layout
+### 6.1 Navigation
+
+```
+Main Menu
+  ├── Play
+  │     ├── Adventure
+  │     ├── Gauntlet
+  │     └── Custom Levels  ← play / edit / delete saved custom levels
+  ├── Create Level          ← opens map editor (new level)
+  └── Settings
+```
+
+From the Custom Levels screen, players can also:
+- **Edit** an existing custom level (opens it in the map editor)
+- **Share** a level (export JSON or copy share URL)
+- **Import** a level from JSON file or URL
+
+### 6.2 Editor Layout
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Toolbar: [ Add Waypoint ] [ Select ] [ Delete ]    │
-│           [ Frog ] [ Spawn ] [ Preview ] [ Export ] │
+│           [ Frog ] [ Spawn ] [ Preview ] [ Save ]   │
+│           [ Share ▾ ]                               │
 ├──────────────────────────────┬──────────────────────┤
 │                              │  Level Properties    │
 │                              │  ─────────────────   │
-│       Canvas (960×540)       │  chainLength: [80]   │
-│                              │  baseSpeed:   [40]   │
-│   Path drawn in real time    │  spawnInterval:[600] │
-│   Waypoints as drag handles  │  colors: [✓R✓G✓B✓Y] │
-│   Frog icon draggable        │  aceTime: [120]      │
-│   Spawn point draggable      │  gapCloseSpeed:[320] │
+│       Canvas (960×540)       │  name:   [My Level]  │
+│                              │  chainLength: [80]   │
+│   Path drawn in real time    │  baseSpeed:   [40]   │
+│   Waypoints as drag handles  │  spawnInterval:[600] │
+│   Frog icon draggable        │  colors: [✓R✓G✓B✓Y] │
+│   Spawn point draggable      │  aceTime: [120]      │
+│                              │  gapCloseSpeed:[320] │
 │                              │  powerUpFreq: [0.08] │
 └──────────────────────────────┴──────────────────────┘
 ```
 
-### 6.2 Waypoint Editing
+### 6.3 Waypoint Editing
 
-- **Add waypoint:** Click on the canvas to append a waypoint to the end of the
-  path. Shift-click inserts between existing waypoints.
-- **Move waypoint:** Drag any waypoint anchor to reposition it. The curve
-  updates in real time.
-- **Delete waypoint:** Select and press Delete, or right-click → Remove.
-- **Auto-smooth handles:** Each waypoint gets Catmull-Rom handles by default
-  with chord-length clamping. The curve preview updates immediately.
-- **Manual handle override:** Drag a handle away from its auto position to
-  override it. The waypoint is marked with a different visual indicator.
-  Double-click an overridden handle to revert to auto-smooth.
-- **Reorder waypoints:** Drag waypoints in the waypoint list panel to reorder
-  the path sequence.
+- **Add waypoint:** Click canvas to append; Shift-click to insert between existing.
+- **Move waypoint:** Drag any anchor — curve updates in real time.
+- **Delete waypoint:** Select + Delete, or right-click → Remove.
+- **Auto-smooth handles:** Catmull-Rom with chord-length clamping by default.
+- **Manual handle override:** Drag a handle to override auto-smooth. A different
+  visual indicator marks overridden waypoints. Double-click handle to revert.
+- **Reorder waypoints:** Drag in the waypoint list panel.
 
-### 6.3 Special Point Placement
+### 6.4 Special Point Placement
 
-- **Frog anchor:** A dedicated draggable icon (frog sprite) placed anywhere on
-  the canvas. Stored as `frogAnchor` in level JSON. Independent of the path.
-- **Spawn point:** A dedicated draggable icon placed anywhere on the canvas.
-  Stored as `spawnPoint`. Typically placed at the start of the path but not
-  required to be.
+- **Frog anchor:** Draggable frog sprite, stored as `frogAnchor`. Independent of path.
+- **Spawn point:** Draggable icon stored as `spawnPoint`. Typically path start
+  but not required.
 
-### 6.4 Live Preview
+### 6.5 Live Preview
 
-- Clicking **Preview** launches the game in a small embedded window running
-  the current level JSON. The author can play the level immediately without
-  exporting.
-- Preview mode supports the debug panel (§14) so the author can tweak
-  `baseSpeed`, `spawnInterval`, etc. in real time and see the effect.
+- **Preview** button transitions directly into the game scene running the
+  current level — same engine, same canvas, no context switch.
+- The debug panel (§15) is available in preview so authors can tweak
+  `baseSpeed`, `spawnInterval`, etc. in real time.
+- Pressing Escape exits preview and returns to the editor with state preserved.
 
-### 6.5 Export
+### 6.6 Saving
 
-- **Export JSON:** Writes the resolved level JSON to a file download. The
-  `editorData` block (waypoints + handle override flags) is included so the
-  level can be re-imported and edited later.
-- **Import JSON:** Loads a previously exported level JSON back into the editor,
-  restoring all waypoints and handle overrides.
-- **Copy to clipboard:** Copies the JSON string directly for pasting into the
-  `data/levels/` directory.
+- **Save** stores the level to **IndexedDB** under a user-provided name.
+- Levels are listed in the Custom Levels menu immediately after saving.
+- Auto-save triggers every 30 s while editing to prevent data loss.
+- The `editorData` block (waypoints + handle override flags) is stored alongside
+  the resolved segments so levels can be re-edited at any time.
 
-### 6.6 Technical Notes
+### 6.7 Sharing
 
-- The editor is a separate Vite entry point (`editor/main.ts`) sharing the
-  `PathSystem` and `BezierUtils` modules with the game.
-- No server required — purely client-side. Runs at `localhost:5174` (game at
-  `5173`).
-- The canvas uses the same logical resolution (960×540) as the game so
-  coordinates map 1:1.
-- `PathSystem.build()` runs live in the editor on every waypoint change,
-  giving the author an accurate arc-length-corrected curve preview.
+| Method | How |
+|---|---|
+| **Export JSON** | Downloads a `.json` file including `editorData`. Another player imports it via the Import button in Custom Levels. |
+| **Share URL** | The level JSON is compressed (LZ-string) and base64-encoded into a URL query parameter: `?level=<encoded>`. Opening the URL imports the level automatically. |
+| **Import JSON** | File picker — loads JSON into the editor or directly into Custom Levels. |
+
+### 6.8 Technical Notes
+
+- The editor is a **scene** (`EditorScene.ts`) in the same game bundle — no
+  separate entry point, no separate server.
+- Shares `PathSystem`, `BezierUtils`, `SpriteSheet`, and `InputManager` with
+  the game. The Three.js renderer and scene graph are reused.
+- `PathSystem.build()` runs on every waypoint change for the live preview.
+- IndexedDB access is wrapped in a small `LevelStore.ts` module with a clean
+  async API (`save`, `load`, `list`, `delete`).
+- URL sharing uses `lz-string` for compression — keeps URLs reasonably short
+  for typical level sizes.
 
 ---
 
 ## 7. Power-Ups and Special Balls
 
-### 6.1 Embedding and Activation
+### 7.1 Embedding and Activation
 
 Power-up balls are embedded directly in the chain as regular balls that also
 carry a `powerUp` tag. They look like normal colored balls but display a glowing
@@ -372,7 +391,7 @@ icon overlay.
 - A minimum gap of 8 balls is enforced between consecutive power-up balls so
   they don't cluster.
 
-### 6.2 Power-Up Reference
+### 7.2 Power-Up Reference
 
 #### Slow
 
@@ -454,7 +473,7 @@ icon overlay.
 | Result | The converted cluster may immediately form a 3+ match with neighbors, triggering a cascade |
 | Multi-chain | Only affects the chain the power-up was embedded in |
 
-### 6.3 Simultaneous Power-Ups
+### 7.3 Simultaneous Power-Ups
 
 Multiple power-ups can be active at the same time. Rules for simultaneous effects:
 
@@ -466,7 +485,7 @@ Multiple power-ups can be active at the same time. Rules for simultaneous effect
 | Slow + Lightning | Lightning pops its targets; Slow continues unaffected |
 | Any timed + Instant | Instant resolves immediately; timed continues ticking |
 
-### 6.4 PowerUpSystem Internals
+### 7.4 PowerUpSystem Internals
 
 ```typescript
 interface ActivePowerUp {
@@ -727,22 +746,33 @@ function that can be imported directly in Vitest without a DOM environment.
 ```
 src/
 ├── main.ts                    # Entry point — wires logic + renderer + input
-├── GameLoop.ts                # Deterministic tick engine (see §12.6)
-├── Game.ts                    # Top-level state machine (menu/playing/paused/gameover)
+├── GameLoop.ts                # Deterministic tick engine (see §13.6)
+├── Game.ts                    # Top-level state machine (menu/editor/playing/paused/gameover)
+│
+├── scenes/
+│   ├── MenuScene.ts           # Main menu, custom levels list
+│   ├── GameScene.ts           # Core gameplay
+│   ├── EditorScene.ts         # Map editor (integrated, not separate bundle)
+│   └── GameOverScene.ts
 │
 ├── logic/                     # Pure game logic — NO Three.js, NO DOM
-│   ├── ChainManager.ts        # Owns all BallChain instances for a level; collision dispatch, all-cleared check
+│   ├── ChainManager.ts        # Owns all BallChain instances; collision dispatch, all-cleared
 │   ├── BallChain.ts           # Single chain: movement, insertion, pop, cascade
 │   ├── Ball.ts                # Ball value type (color, pathT, powerUp)
 │   ├── MatchSystem.ts         # 3+ match detection, cascade resolution
 │   ├── ScoreSystem.ts         # All scoring rules, chain/combo/gap bonuses
-│   ├── PathSystem.ts          # Bézier/polyline, arc-length parameterization
+│   ├── PathSystem.ts          # Bézier segments, arc-length parameterization
 │   ├── CollisionSystem.ts     # Projectile ↔ chain hit detection
 │   ├── PowerUpSystem.ts       # Power-up activation and timer management
 │   ├── SpawnSystem.ts         # Ball spawning schedule
-│   ├── FrogState.ts           # Frog rotation, current/next ball state
+│   ├── FrogState.ts           # Frog rotation, 3-ball queue state
 │   ├── ProjectileState.ts     # In-flight ball position/velocity
 │   └── SkullState.ts          # Path-end state and open-amount calculation
+│
+├── editor/
+│   ├── EditorState.ts         # Waypoints, handle overrides, level properties
+│   ├── WaypointSystem.ts      # Catmull-Rom smoothing, chord-length clamping
+│   └── LevelStore.ts          # IndexedDB CRUD (save/load/list/delete custom levels)
 │
 ├── renderer/                  # All Three.js code — never imported by logic/
 │   ├── Renderer.ts            # Three.js WebGLRenderer, orthographic camera, scene
@@ -750,7 +780,8 @@ src/
 │   ├── FrogRenderer.ts        # Frog mesh, rotation animation
 │   ├── SkullRenderer.ts       # Skull mesh, open-state animation
 │   ├── HUDRenderer.ts         # Score, lives, Zuma bar overlays
-│   └── ParticleRenderer.ts    # Pop particle effects
+│   ├── ParticleRenderer.ts    # Pop particle effects
+│   └── EditorRenderer.ts      # Path curve, waypoint handles, frog/spawn icons
 │
 ├── input/
 │   └── InputManager.ts        # Mouse, touch, keyboard → normalized InputState
@@ -763,19 +794,20 @@ src/
 │   └── SpriteAtlas.ts         # Atlas manifest type definitions
 │
 ├── debug/
-│   ├── DebugOverlay.ts        # On-screen panel (see §14)
+│   ├── DebugOverlay.ts        # On-screen panel (see §15)
 │   ├── DebugConfig.ts         # Runtime-editable settings store
-│   └── StepController.ts     # Pause/step/advance controls for game loop
+│   └── StepController.ts      # Pause/step/advance controls for game loop
 │
 ├── data/
-│   └── levels/
+│   └── levels/                # Built-in levels (authored with map editor)
 │       ├── 1-1.json
 │       └── ...
 │
 └── utils/
     ├── Vec2.ts
     ├── BezierUtils.ts
-    └── Random.ts              # Seeded, replaceable RNG (critical for test replay)
+    ├── LZString.ts             # Compression for URL-encoded level sharing
+    └── Random.ts               # Seeded, replaceable RNG (critical for test replay)
 
 tests/
 ├── unit/                      # Vitest — pure logic tests, no DOM
