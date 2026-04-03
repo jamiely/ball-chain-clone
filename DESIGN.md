@@ -2,7 +2,7 @@
 
 **Project:** ball-chain-clone  
 **Reference Game:** Zuma Deluxe (PopCap Games, 2003)  
-**Document Version:** 1.1  
+**Document Version:** 1.2  
 **Date:** 2026-04-03
 
 ---
@@ -69,8 +69,16 @@ Player rotates frog, aims, fires current ball
            No → any ball reached skull? → LOSE LIFE → retry / game over
 ```
 
-**Key tension mechanic:** The chain continuously accelerates. As balls near the
-skull the skull visually "opens," escalating urgency.
+**Key tension mechanic:** The chain continuously advances toward the skull.
+As the leading ball approaches, the skull visually opens across 5 states,
+escalating urgency. A careless insertion near the skull can push the head ball
+past `pathT = 1.0` and cost a life.
+
+**Cascade mechanic:** A pop opens a gap. The front segment zips back (away from
+skull) to close it. When the gap closes, if the newly adjacent balls form a 3+
+match, another pop triggers — and so on. The chain is frozen during zip-back;
+the player can still fire into zipping segments. There is no fire lockout at
+any point.
 
 ---
 
@@ -80,24 +88,44 @@ skull the skull visually "opens," escalating urgency.
 
 | Property | Value |
 |---|---|
-| Position | Fixed at level-defined anchor point (usually center) |
-| Rotation | 0–360°, follows mouse cursor / analog stick |
+| Position | Per-level `{x, y}` anchor defined in level JSON — may be off-center; independent of spawn point |
+| Rotation | 0–360°, instantaneous — follows mouse/touch with no smoothing lag |
+| Firing arc | Full 360°, no restriction |
 | Current ball | Displayed in frog's mouth |
 | Next ball | Displayed on frog's back |
+| Queue depth | 3 balls internally (current, next, reserve) — only current and next are displayed |
 | Swap | Player may swap current ↔ next at any time |
+| Fire animation | Single-frame shoot pose held for fire throttle duration, returns to idle |
+| Fire throttle | Fixed constant `FIRE_THROTTLE_MS` (tunable) — resets on each shot |
 
-The frog always holds two balls. When the current ball is fired, next ball becomes
-current and a new random ball is generated for next.
+**Ball queue:** The frog maintains a 3-ball internal queue. Only the current (mouth)
+and next (back) balls are shown. When the player fires:
+1. Current ball launches as projectile.
+2. Next → current (shown in mouth).
+3. Reserve → next (shown on back).
+4. New ball generated for reserve (not yet visible).
+
+**Smart color generation:** When `ballsRemaining > LOW_BALL_THRESHOLD` (default 10,
+counts all unpopped balls including not-yet-spawned), new balls are generated from
+the full color set for the level. When `ballsRemaining ≤ LOW_BALL_THRESHOLD`, new
+balls are restricted to colors still present among remaining unpopped balls —
+ensuring the player always has a useful shot in the final stretch.
+
+**Multiple projectiles:** Multiple balls can be in flight simultaneously. The fire
+throttle limits how quickly the player can fire but does not prevent a second
+projectile while the first is still travelling. Each projectile resolves
+independently on collision.
 
 ### 3.2 Ball Chain
 
-- Balls are stored as an ordered list with a `pathT` parameter (0.0 = spawn,
-  1.0 = skull) representing normalized distance along the Bézier/polyline path.
-- Each ball has: `color`, `pathT`, `radius`, `powerUp | null`.
-- The chain advances at a base speed that scales with level number.
-- Chain speed increases slightly after each ball group is popped (brief pullback
-  first, then resume).
-- A **reverse** event can push `pathT` backward temporarily.
+- Balls are stored as an ordered list sorted by `pathT` ascending (index 0 = tail
+  at spawn, last index = head at skull).
+- Each ball has: `color`, `pathT`, `powerUp | null`.
+- Balls only move forward because they are pushed from behind — no push means
+  stationary. See §12.6 for full movement model.
+- **Chain pauses** during any zip-back — spawner stops pushing until all
+  gap-closes complete.
+- Balls never move toward spawn except during zip-back or Reverse power-up.
 
 ### 3.3 Ball Colors
 
@@ -112,19 +140,29 @@ chains accidentally; more colors = deliberate aim required.
 
 ### 3.4 The Skull
 
-- Located at path end (pathT = 1.0).
-- Animated: mouth opens wider as the leading ball's `pathT` approaches 1.0.
-- Fully open at `pathT >= 0.90` (danger zone — audio cue fires).
-- When a ball enters (pathT > 1.0), all remaining balls follow and the player
-  loses a life.
+- Located at path end (`pathT = 1.0`). Responds to the **absolute leading ball** only.
+- 5 visual open states driven by leading ball `pathT`:
+
+| State | pathT range |
+|---|---|
+| Closed | < 0.75 |
+| Quarter open | 0.75 – 0.84 |
+| Half open | 0.84 – 0.89 |
+| Open | 0.89 – 0.95 |
+| Fully open | ≥ 0.95 |
+
+- When the head ball reaches `pathT >= 1.0`: the entire chain accelerates and
+  flushes into the skull (toilet-flush animation). All in-flight projectiles
+  disappear with animation. Life is decremented. Level restarts.
 
 ### 3.5 Projectile Ball
 
-- Fired from frog at a fixed speed in the aim direction.
-- Physics: straight-line travel, no gravity, no arc.
-- On collision with the chain, the ball inserts between the two nearest balls
-  along the path closest to the collision point.
-- On miss: ball disappears off-screen.
+- Fired from the frog's position (not the spawn point) in the aimed direction.
+- Straight-line travel, no arc, no gravity.
+- Circle-overlap collision detection against all chain balls each tick.
+- On miss: disappears off-screen. May be recycled into queue as optimization.
+- On game over: all in-flight projectiles play disappear animation and are removed.
+- Multiple projectiles can be in flight simultaneously.
 
 ---
 
@@ -378,14 +416,20 @@ comboBonus = previousGroupScore × 1.5  (cumulative per cascade level)
 
 ### 7.4 Gap Shot Bonus
 
-Firing through a gap in the chain to hit balls further along awards a multiplier:
+A gap shot qualifies when the projectile passes through at least one gap wider
+than one ball diameter before hitting the chain. Each qualifying gap adds +1 to
+the multiplier:
 
 ```
-gapMultiplier = 1 + (number of gaps passed through)
+gapMultiplier = 1 + (number of qualifying gaps passed through)
+score = (ballsPopped × 10) × gapMultiplier
 ```
 
-The projectile must travel through at least one visible gap (ball spacing > ball
-diameter) to qualify.
+Gap multiplier stacks independently with chain bonus:
+
+```
+totalScore = ((ballsPopped × 10) × gapMultiplier) + chainBonus
+```
 
 ### 7.5 Ace Time Bonus
 
@@ -413,8 +457,9 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ### 8.2 Lose (Life)
 
-- Any ball reaches pathT ≥ 1.0 (enters the skull).
-- All remaining chain balls are pulled in instantly.
+- Head ball reaches `pathT >= 1.0`.
+- Entire chain accelerates and flushes into the skull (toilet-flush animation).
+- All in-flight projectiles disappear with animation.
 - Player loses 1 life.
 - Level restarts from scratch.
 
@@ -1056,11 +1101,13 @@ interface TickInput {
 interface GameState {
   chains: ChainManager;
   frog: FrogState;
-  projectile: ProjectileState | null;
+  projectiles: ProjectileState[];  // multiple in-flight simultaneously
   score: ScoreState;
   powerUps: ActivePowerUp[];
   skull: SkullState;
-  rng: Random;            // seeded — same seed == same game
+  fireThrottleMs: number;          // countdown to next allowed shot
+  ballsRemaining: number;          // total unpopped balls (in-chain + unspawned)
+  rng: Random;                     // seeded — same seed == same game
   tickCount: number;
 }
 
@@ -1095,6 +1142,27 @@ requestAnimationFrame loop:
   renderer.sync(state)                     // write state → Three.js meshes
   renderer.render()                        // three.js renderer.render(scene, cam)
   debugOverlay.draw(state)                 // no-op unless debug mode enabled
+```
+
+**tick() ordering within a frame:**
+
+```
+1. Decrement fireThrottleMs
+2. Handle fire input (if fireThrottleMs <= 0, launch projectile, reset throttle)
+3. Handle swap input
+4. Move all in-flight projectiles
+5. Collision detection: each projectile vs all chains
+   → on hit: insert ball, run match check, trigger zip-back if pop
+6. if chains.anyZipping():
+     chains.updateZip(dt)       // advance zip-back animations
+     chains.checkGapClose()     // fire match check on any newly closed gaps
+     // spawner paused — no push
+   else:
+     chains.updatePush(dt)      // normal push-from-back movement
+     SpawnSystem.update(dt)     // emit new balls at tail
+7. PowerUpSystem.update(dt)
+8. SkullSystem.check()          // leading ball pathT >= 1.0?
+9. ScoreSystem.flush()
 ```
 
 ---
