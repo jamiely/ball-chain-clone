@@ -817,122 +817,144 @@ both classes easy to test independently.
 
 ### 12.6 Chain Movement Model
 
+#### Orientation
+
+```
+SPAWN POINT  →  →  →  →  →  →  →  SKULL
+   pathT=0   [tail]  ...  [head]   pathT=1
+             (back)       (front)
+```
+
+- **Front / head** — the leading ball, highest `pathT`, closest to the skull.
+- **Back / tail** — the last spawned ball, lowest `pathT`, closest to spawn.
+- Balls travel from `pathT=0` toward `pathT=1` (spawn → skull).
+- The chain array is sorted by `pathT` ascending: `index 0 = tail`, `last index = head`.
+
 #### Ball representation
 
-Each ball is an independent object with its own `pathT` (normalized position
-along the path, 0.0 = spawn point, 1.0 = skull). Balls do not share a single
-speed value — they each move at whatever speed the ball in front allows.
+Each ball is an independent object with its own `pathT`. There is no shared
+chain velocity — a ball only moves because something behind it pushes it.
 
 ```typescript
 interface Ball {
   color: BallColor;
-  pathT: number;        // current position along path
+  pathT: number;        // 0.0 = spawn point, 1.0 = skull
   powerUp: PowerUpType | null;
 }
 ```
 
-The chain array is always kept sorted by `pathT` descending (index 0 = leading
-ball closest to skull, last index = tail ball closest to spawn).
-
 #### Push-from-back movement
 
-Each tick the spawner pushes the tail ball forward by `pushSpeed * dt`. Each
-ball in turn pushes the ball in front if the gap between them drops below
-`minSpacing` (= 1 ball diameter in path units). This propagates forward through
-the chain — compressed segments all move at `pushSpeed`, while free-floating
-front segments continue at their own last speed.
+The spawner pushes the tail ball forward by `pushSpeed * dt` each tick. A ball
+passes that push to the ball in front of it only when the gap between them
+reaches `minSpacing` (= 1 ball diameter in path units). If a gap exists ahead
+of a ball, that ball **does not move** — there is nothing in front to push
+against and nothing behind has reached it yet.
 
 ```
 tick():
-  tail.pathT += pushSpeed * dt
+  // Push tail forward from spawner
+  balls[0].pathT += pushSpeed * dt
 
-  for i from lastIndex-1 down to 0:
-    gap = balls[i].pathT - balls[i+1].pathT
-    if gap < minSpacing:
-      balls[i].pathT = balls[i+1].pathT + minSpacing
+  // Propagate push through the chain toward the head
+  for i from 1 to lastIndex:
+    gap = balls[i].pathT - balls[i-1].pathT
+    if gap <= minSpacing:
+      // In contact — push propagates
+      balls[i].pathT = balls[i-1].pathT + minSpacing
+    else:
+      // Gap exists ahead — this ball and everything beyond it is stationary
+      break
 ```
 
-This means:
-- A segment with no gap behind it moves at `pushSpeed`.
-- A segment that has been separated from the back (by a gap) **continues
-  moving forward at whatever speed it was already travelling** — it does not
-  slow down or stop. It is now a free-floating segment.
-- Multiple free-floating segments can exist simultaneously, each moving
-  independently at their own speed.
-
-**Open question for discussion:** what speed does a free-floating front segment
-travel at after it separates? Options:
-- Same `pushSpeed` as the back (it just keeps its current speed)
-- Slightly faster than `pushSpeed` (floats away from the back)
-- Decelerates slightly (gravity-like drag toward the skull)
+Key consequences:
+- A **compressed segment** (no gaps within it) moves entirely at `pushSpeed`.
+- A **free-floating front segment** (gap behind it) is **stationary** — it
+  receives no push and does not move toward the skull on its own.
+- The front segment being stationary is **good for the player** — the leading
+  ball stops advancing toward the skull while the gap exists.
 
 #### Gap definition
 
 A gap exists between balls `i` and `i+1` when:
 
 ```
-balls[i].pathT - balls[i+1].pathT > minSpacing
+balls[i+1].pathT - balls[i].pathT > minSpacing
 ```
 
+(where `i+1` is closer to the skull / head side)
+
 Gaps arise from two sources:
-1. **Natural spawn gaps** — the spawner emits balls at intervals, so newly
-   spawned balls have not yet compressed into the back of the existing chain.
-2. **Pop gaps** — when a group is removed, the front segment separates from
-   the back segment.
+1. **Spawn gaps** — the spawner emits balls at intervals; newly spawned balls
+   have not yet pushed into contact with the rest of the chain.
+2. **Pop gaps** — when a group is removed, the front segment is no longer in
+   contact with the back segment and becomes stationary.
 
 #### Gap close rules
 
 A gap closes in exactly **two** cases:
 
 **Case 1 — Pop.**
-When a group of 3+ same-color balls is removed, the back segment behind the
-gap rushes forward to fill it. The back segment's `pushSpeed` is temporarily
-set to `gapCloseSpeed` (a fast constant, much higher than normal `pushSpeed`)
-until the gap is fully closed (spacing returns to `minSpacing`).
+When a group of 3+ same-color balls is removed, a gap opens. The front segment
+is now stationary. The **front segment rushes backward** (toward the spawn
+point, away from the skull) at `gapCloseSpeed` to meet the stationary back
+segment.
 
 **Case 2 — Color match across a gap.**
-After every state change (insertion, pop, ball movement tick), every gap in the
-chain is checked. If the balls on either side of a gap are the same color, the
-gap closes — the back segment rushes forward at `gapCloseSpeed` exactly as in
-Case 1.
+After every state change (insertion, pop, movement tick), every gap in the
+chain is checked. If the balls on **either side** of a gap are the same color,
+the gap triggers a close — the **front segment rushes backward** at
+`gapCloseSpeed` to meet the back segment, identical to Case 1.
 
-This check runs on **all gaps**, not just the most recently created one, and
-runs **every tick** while any gap-close is in progress.
+This check runs across **all gaps** every tick while any gap-close is in
+progress, not just the most recently created gap.
 
-#### Cascade mechanics
+#### Front segment zip-back
 
-Gap-close Case 2 is what produces cascades:
+When a gap-close triggers, the front segment moves **backward** (decreasing
+`pathT`) at `gapCloseSpeed`. This is the "zip back" the player sees — the
+leading balls visibly pulling away from the skull toward the spawn side. This
+is the primary moment of relief after a successful shot.
 
-1. Group A pops → gap opens between front and back segment.
-2. Back segment rushes forward (Case 1).
-3. When back segment reaches front segment, the newly adjacent balls are
-   checked for color match.
-4. If they match → they join an existing color group → if that group now has
-   3+ → pop → new gap → back rushes forward again → repeat.
-
-Cascades terminate naturally when a gap closes and the newly adjacent balls do
-not form a 3+ group.
-
-#### Multiple simultaneous gaps
-
-Multiple gaps can exist and be closing simultaneously. Each gap tracks its own
-close state independently. The `pushSpeed` boost for a closing gap applies only
-to the segment **immediately behind that gap** — it does not cascade the speed
-boost further down the chain.
-
-```typescript
-interface Gap {
-  frontIndex: number;   // index of ball at front edge of gap
-  backIndex: number;    // index of ball at back edge of gap
-  closing: boolean;     // true = rushing to close
-}
 ```
+gapClose tick():
+  frontSegmentHead.pathT -= gapCloseSpeed * dt
+  // propagate backward through front segment (push all front balls back together)
+  for each ball in front segment (head → tail direction):
+    maintain minSpacing from ball ahead
+```
+
+The back segment does **not** change speed during a gap close — it continues
+being pushed at `pushSpeed` from the spawner as normal.
+
+When the front segment's tail ball reaches `minSpacing` of the back segment's
+head ball, the gap is closed. The front segment stops its backward motion and
+resumes being pushed forward at `pushSpeed` by the back segment.
 
 #### Post-close match check
 
-When a gap fully closes (spacing reaches `minSpacing`), `MatchSystem` immediately
-checks the newly adjacent pair. This is the only time a match check is triggered
-by movement — all other match checks are triggered by insertions or pops.
+When a gap fully closes, `MatchSystem` immediately checks the newly adjacent
+ball pair. If they match and together with neighbors form a group of 3+, that
+group pops — opening a new gap — and the process repeats.
+
+This is the **cascade**: each pop creates a gap, the front segment zips back,
+closes against the back segment, a new match is checked, another pop may occur.
+Cascades terminate when a gap closes and the newly adjacent balls do not form
+a 3+ group.
+
+#### Multiple simultaneous gaps
+
+Multiple gaps can exist simultaneously (e.g. natural spawn gaps plus a pop gap).
+Each is tracked independently. Each closing gap has its own front segment
+zipping backward. A segment can only be part of one gap-close at a time.
+
+```typescript
+interface GapCloseState {
+  frontSegmentStartIndex: number;  // index of tail ball of the front segment
+  backSegmentEndIndex: number;     // index of head ball of the back segment
+  closing: boolean;
+}
+```
 
 ---
 
