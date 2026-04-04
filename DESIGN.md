@@ -525,14 +525,14 @@ is adjusted without `ChainManager` knowing anything about power-up state directl
 
 ## 8. Scoring System
 
-### 7.1 Base Score
+### 8.1 Base Score
 
 | Event | Points |
 |---|---|
 | Ball popped (base) | 10 pts each |
 | Coin collected | 500 pts |
 
-### 7.2 Chain Bonus
+### 8.2 Chain Bonus
 
 Each successive pop **without missing or the chain stopping** increments the
 chain counter `n`. Bonus per pop group:
@@ -547,7 +547,7 @@ Examples:
 
 Chain counter resets on any miss or when no new pop occurs within 3 s.
 
-### 7.3 Combo (Cascade) Bonus
+### 8.3 Combo (Cascade) Bonus
 
 When popping one group causes a gap that immediately triggers a second (or more)
 pop via chain reaction, each additional pop awards:
@@ -556,7 +556,7 @@ pop via chain reaction, each additional pop awards:
 comboBonus = previousGroupScore × 1.5  (cumulative per cascade level)
 ```
 
-### 7.4 Gap Shot Bonus
+### 8.4 Gap Shot Bonus
 
 A gap shot qualifies when the projectile passes through at least one gap wider
 than one ball diameter before hitting the chain. Each qualifying gap adds +1 to
@@ -573,7 +573,7 @@ Gap multiplier stacks independently with chain bonus:
 totalScore = ((ballsPopped × 10) × gapMultiplier) + chainBonus
 ```
 
-### 7.5 Ace Time Bonus
+### 8.5 Ace Time Bonus
 
 If a level is cleared in under the "Ace Time" threshold (defined per level in
 JSON as `aceTimeSeconds`), a flat bonus is awarded:
@@ -582,7 +582,7 @@ JSON as `aceTimeSeconds`), a flat bonus is awarded:
 aceBonus = remainingSeconds × 100
 ```
 
-### 7.6 Extra Lives
+### 8.6 Extra Lives
 
 One extra life awarded for every **50,000 points** accumulated.
 
@@ -652,18 +652,30 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ## 11. Progression System
 
-### 10.1 Save State (localStorage)
+### 10.1 Save State (IndexedDB)
 
+All persistent state is stored in IndexedDB via `LevelStore.ts`. There is no
+use of `localStorage`. Two object stores:
+
+**`playerProgress` store** — one record, keyed by `"progress"`:
 ```json
 {
   "highScore": 0,
-  "adventureProgress": {
-    "stage": 1,
-    "level": 1
-  },
+  "adventureProgress": { "stage": 1, "level": 1 },
   "gauntletUnlocked": false,
   "gauntletRank": "Rabbit",
   "totalScore": 0
+}
+```
+
+**`customLevels` store** — one record per custom level, keyed by `levelId` (UUID):
+```json
+{
+  "id": "uuid",
+  "name": "My Level",
+  "createdAt": 1234567890,
+  "updatedAt": 1234567890,
+  "levelData": { ... }
 }
 ```
 
@@ -1613,14 +1625,13 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
 4. **Difficulty balancing:** Exact `baseSpeed` and `spawnInterval` values need
    empirical playtesting — initial numbers in level JSONs are estimates.
 
-5. **Continues / payment:** Free continues or limited? (Out of scope for MVP;
-   default to no limit.)
+5. **Continues / payment:** Unlimited continues. (Resolved.)
 
-6. **Network features:** High score leaderboard? (Out of scope for MVP; suggest
-   localStorage only.)
+6. **Network features:** No leaderboard. Scores and progress stored in IndexedDB
+   alongside custom levels. (Resolved.)
 
-7. **Level editor:** Built-in path editor tool for designers? (Out of scope for
-   MVP; use JSON directly.)
+7. **Level editor:** Integrated into the game as `EditorScene` — accessible from
+   the main menu in all builds. (Resolved — see §6.)
 
 8. **License / naming:** Avoid "Zuma" in the final product name to prevent
    trademark issues. Current repo name "ball-chain-clone" works as a codename.
