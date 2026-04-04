@@ -117,6 +117,16 @@ throttle limits how quickly the player can fire but does not prevent a second
 projectile while the first is still travelling. Each projectile resolves
 independently on collision.
 
+**Swap mechanic:**
+- The player can swap current ↔ next at any time — including while projectiles
+  are in flight.
+- Swap only affects the queue; it has no effect on balls already in flight.
+  In-flight projectiles retain their original color regardless of swap.
+- Swap is not subject to the fire throttle — it can be triggered independently
+  at any time.
+- Swapping does not consume a ball or generate a new one — it only exchanges
+  the positions of current and next in the queue.
+
 ### 3.2 Ball Chain
 
 - Balls are stored as an ordered list sorted by `pathT` ascending (index 0 = tail
@@ -234,8 +244,8 @@ that the runtime ignores.
   },
   "spawnPoint": [50, 300],
   "frogAnchor": [400, 270],
-  "spawnInterval": 600,
   "chainLength": 80,
+  "minSpawnGap": 0,
   "baseSpeed": 40,
   "speedAcceleration": 0.5,
   "colors": ["red", "green", "blue", "yellow"],
@@ -534,8 +544,7 @@ is adjusted without `ChainManager` knowing anything about power-up state directl
 
 ### 8.2 Chain Bonus
 
-Each successive pop **without missing or the chain stopping** increments the
-chain counter `n`. Bonus per pop group:
+Each successive pop increments the chain counter `n`. Bonus per pop group:
 
 ```
 chainBonus = 200 + (n × 10)
@@ -545,7 +554,19 @@ Examples:
 - 10th consecutive group: +300 pts
 - 20th consecutive group: +400 pts
 
-Chain counter resets on any miss or when no new pop occurs within 3 s.
+**Counter increments on:**
+- Any direct shot that causes a pop (3+ match).
+- Any cascade pop triggered by a gap close.
+
+**Counter resets on:**
+- A fired ball that hits the chain but does **not** result in a pop (inserted
+  but no 3+ match formed).
+- A fired ball that misses the chain entirely.
+- The chain fully clearing (level complete) — counter resets for the next level.
+- A life lost — counter resets on level restart.
+
+A cascade sequence (multiple pops from one shot) increments `n` once per pop
+in the cascade — a 3-pop cascade increments `n` by 3.
 
 ### 8.3 Combo (Cascade) Bonus
 
@@ -593,9 +614,23 @@ One extra life awarded for every **50,000 points** accumulated.
 ### 8.1 Win
 
 - All balls in the level's chain have been popped.
-- The Zuma bar (a progress meter filled by popping balls) reaches 100%.
+- All `chainLength` balls have been popped — the Zuma bar reaches 100%.
 - Level complete screen shown; score tallied with bonuses.
 - Player advances to next level.
+
+**Zuma bar:**
+The Zuma bar is a progress meter displayed in the HUD. It fills as balls are
+popped and empties slightly when a life is lost (to reflect the level restarting).
+
+```
+zumaBarFill = ballsPopped / chainLength   (0.0 – 1.0)
+```
+
+- Increments by `1 / chainLength` for each ball popped (individually, not per
+  group — a 5-ball pop increments by `5 / chainLength`).
+- Cascade pops contribute normally — each ball in a cascade counts.
+- Resets to `0.0` when a life is lost and the level restarts.
+- Reaches `1.0` exactly when the last ball is popped — triggers level complete.
 
 ### 8.2 Lose (Life)
 
@@ -686,8 +721,8 @@ use of `localStorage`. Two object stores:
 | `baseSpeed` | Starting `pushSpeed` in pixels/second |
 | `speedAcceleration` | Pixels/second² added each second: `pushSpeed += speedAcceleration * dt` |
 | `maxSpeed` | Speed cap — suggested default `3 × baseSpeed`. Speed never exceeds this |
-| `spawnInterval` | Milliseconds between new balls entering the chain |
-| `chainLength` | Total balls to spawn for the level |
+| `chainLength` | Total balls to spawn for the level — spawning stops once this count is reached |
+| `minSpawnGap` | Minimum additional spacing (pixels) beyond `minSpacing` before next ball spawns. Default `0` (spawn immediately when `minSpacing` is clear) |
 | `colors` | Array of allowed ball colors |
 | `powerUpFrequency` | Ratio of balls carrying a power-up (0.0–1.0, default 0.08) |
 | `aceTimeSeconds` | Target clear time for ace time bonus |
@@ -1145,6 +1180,31 @@ Key consequences:
 - The front segment being stationary is **good for the player** — the leading
   ball stops advancing toward the skull while the gap exists.
 
+#### Spawn system
+
+A new ball enters the chain at `pathT = 0` (the spawn point) when the current
+tail ball has moved at least `minSpacing + minSpawnGap` away from `pathT = 0`.
+This is purely distance-based — no timer involved.
+
+```
+SpawnSystem.update():
+  if ballsSpawned < chainLength:
+    tailArcLen = PathSystem.arcLenFromPathT(path, balls[0].pathT)
+    if tailArcLen >= minSpacing + minSpawnGap:
+      newBall = generateBall(rng, activeColors)
+      balls.unshift({ color: newBall, pathT: 0, powerUp: null })
+      ballsSpawned++
+```
+
+- At high `pushSpeed` the tail moves away quickly — balls enter more frequently,
+  producing a denser chain.
+- At low `pushSpeed` they enter less frequently — sparser chain.
+- `minSpawnGap` (default `0`) can introduce deliberate spacing between balls for
+  levels that want visible gaps in the incoming chain.
+- Spawning stops permanently once `ballsSpawned == chainLength`.
+- The spawner also pauses while any zip-back is in progress (consistent with
+  chain pause rule).
+
 #### Gap definition
 
 A gap exists between balls `i` and `i+1` when:
@@ -1156,7 +1216,8 @@ balls[i+1].pathT - balls[i].pathT > minSpacing
 (where `i+1` is closer to the skull / head side)
 
 Gaps arise from two sources:
-1. **Spawn gaps** — the spawner emits balls at intervals; newly spawned balls
+1. **Spawn gaps** — the spawner emits balls only when the tail has moved far
+   enough; if `minSpawnGap > 0` a deliberate gap appears between each new ball
    have not yet pushed into contact with the rest of the chain. These are
    uncommon in practice but are treated identically to pop gaps — Case 2
    applies if the balls on either side happen to be the same color.
@@ -1306,6 +1367,23 @@ ball's index in both directions, counting consecutive same-color balls
 
 The match check is synchronous — it happens in the same tick as the insertion,
 with no delay.
+
+#### Simultaneous collisions
+
+Multiple projectiles can be in flight and may hit the chain in the same tick.
+When two or more projectiles collide with the chain in the same tick:
+
+- Collisions are processed **sequentially in projectile launch order** (oldest
+  projectile first).
+- Each insertion and its resulting match check, pop, and gap-close are fully
+  resolved before the next projectile collision is processed.
+- This means the second projectile may hit a chain that has already been
+  modified by the first — its insertion point is computed against the updated
+  chain state.
+- If two projectiles hit the **exact same ball** in the same tick, the first
+  (oldest) is processed normally. The second re-evaluates against the updated
+  chain after the first insertion; if its collision target no longer exists
+  (was popped), the projectile is treated as a miss.
 
 ---
 
