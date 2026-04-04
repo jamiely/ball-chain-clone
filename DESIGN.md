@@ -681,13 +681,22 @@ use of `localStorage`. Two object stores:
 
 ### 10.2 Difficulty Tuning Knobs (per level JSON)
 
-- `baseSpeed` — starting chain velocity
-- `speedAcceleration` — rate of acceleration over time
-- `spawnInterval` — time between new balls entering
-- `chainLength` — total number of balls
-- `colors` — array of allowed ball colors (controls difficulty)
-- `powerUpFrequency` — ratio of balls that carry power-ups (0.0–1.0)
-- `aceTimeSeconds` — target clear time for ace bonus
+| Field | Description |
+|---|---|
+| `baseSpeed` | Starting `pushSpeed` in pixels/second |
+| `speedAcceleration` | Pixels/second² added each second: `pushSpeed += speedAcceleration * dt` |
+| `maxSpeed` | Speed cap — suggested default `3 × baseSpeed`. Speed never exceeds this |
+| `spawnInterval` | Milliseconds between new balls entering the chain |
+| `chainLength` | Total balls to spawn for the level |
+| `colors` | Array of allowed ball colors |
+| `powerUpFrequency` | Ratio of balls carrying a power-up (0.0–1.0, default 0.08) |
+| `aceTimeSeconds` | Target clear time for ace time bonus |
+| `gapCloseSpeed` | Speed of front-segment zip-back in pixels/second (default `8 × baseSpeed`) |
+| `lowBallThreshold` | Ball count below which smart color generation activates (default 10) |
+
+**Speed progression:** `pushSpeed` increases continuously from `baseSpeed` toward
+`maxSpeed` at rate `speedAcceleration` per second. Speed never resets mid-level —
+only on level restart after a life lost.
 
 ---
 
