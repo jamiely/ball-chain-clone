@@ -179,13 +179,32 @@ chains accidentally; more colors = deliberate aim required.
 
 ## 4. Controls
 
-### Mouse / Touch (primary)
+### Mouse (desktop)
 
 | Action | Input |
 |---|---|
-| Aim | Move mouse / drag touch toward target |
-| Fire | Left click / tap |
-| Swap balls | Right click / two-finger tap |
+| Aim | Move mouse — frog rotates to face cursor instantly |
+| Fire | Left click |
+| Swap balls | Right click |
+
+### Touch (mobile)
+
+| Action | Input |
+|---|---|
+| Aim + Fire | Tap anywhere — frog aims toward tap position and fires immediately |
+| Aim without firing | Drag finger — frog tracks finger position; ball fires on release |
+| Swap balls | Two-finger tap |
+
+**Touch behavior detail:**
+- A **tap** (touch down + up with minimal movement) aims toward the touch
+  position and fires in one gesture. The player doesn't need to aim first —
+  wherever they tap is where the ball goes.
+- A **drag** updates the aim angle in real time as the finger moves. The ball
+  fires when the finger is lifted. This gives the player fine-grained control
+  when precision matters.
+- The fire throttle applies to both tap and drag-release — if the throttle
+  hasn't elapsed since the last shot, the gesture is ignored.
+- Two-finger tap anywhere on screen swaps current and next ball.
 
 ### Keyboard (secondary)
 
