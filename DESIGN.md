@@ -170,8 +170,11 @@ chains accidentally; more colors = deliberate aim required.
 
 - Fired from the frog's position (not the spawn point) in the aimed direction.
 - Straight-line travel, no arc, no gravity.
+- **Travels freely through the level** — path geometry and background art do not
+  block projectiles. Only chain balls are valid collision targets.
 - Circle-overlap collision detection against all chain balls each tick.
 - On miss: disappears off-screen. May be recycled into queue as optimization.
+- On level complete: disappears immediately when the last ball is popped.
 - On game over: all in-flight projectiles play disappear animation and are removed.
 - Multiple projectiles can be in flight simultaneously.
 
@@ -335,7 +338,7 @@ From the Custom Levels screen, players can also:
 │       Canvas (960×540)       │  name:   [My Level]  │
 │                              │  chainLength: [80]   │
 │   Path drawn in real time    │  baseSpeed:   [40]   │
-│   Waypoints as drag handles  │  spawnInterval:[600] │
+│   Waypoints as drag handles  │  minSpawnGap: [0]    │
 │   Frog icon draggable        │  colors: [✓R✓G✓B✓Y] │
 │   Spawn point draggable      │  aceTime: [120]      │
 │                              │  gapCloseSpeed:[320] │
@@ -364,7 +367,7 @@ From the Custom Levels screen, players can also:
 - **Preview** button transitions directly into the game scene running the
   current level — same engine, same canvas, no context switch.
 - The debug panel (§15) is available in preview so authors can tweak
-  `baseSpeed`, `spawnInterval`, etc. in real time.
+  `baseSpeed`, `minSpawnGap`, etc. in real time.
 - Pressing Escape exits preview and returns to the editor with state preserved.
 
 ### 6.6 Saving
@@ -587,6 +590,10 @@ Examples:
 A cascade sequence (multiple pops from one shot) increments `n` once per pop
 in the cascade — a 3-pop cascade increments `n` by 3.
 
+**Dual-chain levels:** The chain combo counter is **shared across both chains**.
+A pop on chain A followed by a pop on chain B continues the same counter — the
+player is not penalised for switching targets between chains.
+
 ### 8.3 Combo (Cascade) Bonus
 
 When popping one group causes a gap that immediately triggers a second (or more)
@@ -632,8 +639,9 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ### 8.1 Win
 
-- All balls in the level's chain have been popped.
 - All `chainLength` balls have been popped — the Zuma bar reaches 100%.
+- All in-flight projectiles **disappear immediately** when the last ball is
+  popped — they do not complete their flight.
 - Level complete screen shown; score tallied with bonuses.
 - Player advances to next level.
 
@@ -1731,7 +1739,7 @@ interface DebugConfig {
   enabled: boolean;
   paused: boolean;
   speedMultiplier: number | null;
-  spawnInterval: number | null;
+  minSpawnGap: number | null;
   restrictColors: BallColor[] | null;
   godMode: boolean;
   showPath: boolean;
@@ -1784,7 +1792,7 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
    application, and all-cleared checks. `BallChain` stays single-responsibility.
    (Resolved — see §12.5.)
 
-4. **Difficulty balancing:** Exact `baseSpeed` and `spawnInterval` values need
+4. **Difficulty balancing:** Exact `baseSpeed` and `minSpawnGap` values need
    empirical playtesting — initial numbers in level JSONs are estimates.
 
 5. **Continues / payment:** Unlimited continues. (Resolved.)
