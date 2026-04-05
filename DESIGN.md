@@ -791,16 +791,62 @@ For our clone, we can use simplified flat/vector art with the same thematic cues
 
 ### 11.3 Audio Design
 
-- **BGM:** Loop of tribal / Mesoamerican-inspired ambient track (flutes, drums)
-- **Ball pop SFX:** Crisp stone-crack sound; pitch rises slightly with chain combo
-- **Skull warning:** Deep drum beat when leading ball enters danger zone
-- **Power-up collect:** Short chime / glyph-activation sound
-- **Level complete:** Triumphant horn fanfare
-- **Game over:** Low, slow drum sequence
-- **Zuma vocal cue:** Voice shout "Zumaaa!" on especially large chain clears (5+
-  balls in a single cascade)
+All audio implemented via Web Audio API with OGG / MP3 fallback.
 
-All audio can be implemented via Web Audio API with OGG / MP3 fallback.
+#### Continuous
+
+| Event | Sound |
+|---|---|
+| Gameplay BGM | Looping tribal / Mesoamerican ambient track (flutes, drums); fades on pause |
+
+#### Chain / ball events
+
+| Event | Sound |
+|---|---|
+| Ball fired | Short pop / thwack from frog |
+| Ball inserted, no match | Soft thud |
+| Group pop (3+) | Stone crack / burst; pitch scales with group size |
+| Cascade pop | Same as group pop; pitch increments slightly each cascade level |
+| Gap shot | Distinct swoosh as ball passes through gap |
+
+#### Skull events
+
+| Event | Sound |
+|---|---|
+| Skull quarter open | Single low drum beat |
+| Skull fully open | Urgent repeating pulse — continues until danger resolves |
+| Skull swallow (life lost) | Deep descending thud + drain sound |
+
+#### Power-up events
+
+| Event | Sound |
+|---|---|
+| Power-up embedded in chain | Subtle shimmer loop while ball exists in chain |
+| Power-up activated (any) | Distinct chime per type — 7 unique activation sounds |
+| Slow effect | Warping slow-down tone |
+| Reverse effect | Whoosh backward |
+| Lightning effect | Crack of electricity |
+| Laser effect | Sci-fi beam charge + fire |
+| Bomb effect | Explosion burst |
+| Accuracy effect | Soft focus chime |
+| Color Change effect | Magical shimmer sweep |
+
+#### Frog / queue
+
+| Event | Sound |
+|---|---|
+| Ball swap | Light click |
+| Fire throttle exhausted (too fast) | Short denied / dry thud |
+
+#### Progression
+
+| Event | Sound |
+|---|---|
+| Level complete | Triumphant horn fanfare |
+| Life lost | Short negative sting |
+| Game over | Slow ceremonial drum sequence |
+| Extra life earned | Ascending chime |
+| "Zuma!" vocal cue | Voice shout "Zumaaa!" — triggers on cascade of 5+ balls in a single chain reaction |
 
 ---
 
