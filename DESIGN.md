@@ -256,9 +256,9 @@ that the runtime ignores.
   },
   "editorData": {
     "waypoints": [
-      { "pos": [50,300], "handleOverride": false },
-      { "pos": [350,300], "handleOverride": false },
-      { "pos": [650,300], "handleOverride": false }
+      { "pos": [50,300],  "z": 0, "handleOverride": false },
+      { "pos": [350,300], "z": 1, "handleOverride": false },
+      { "pos": [650,300], "z": 2, "handleOverride": false }
     ]
   },
   "spawnPoint": [50, 300],
@@ -1010,7 +1010,7 @@ class SpriteSheet {
   orthographic scene.
 - The camera is a `THREE.OrthographicCamera` sized to the logical canvas
   resolution (e.g. 960 × 540), so world units == pixels.
-- No perspective; z-ordering is handled by `mesh.renderOrder` or `mesh.position.z`.
+- No perspective; z-ordering is handled by `mesh.renderOrder` driven by each ball's `ball.z` value (see §12.6 Z-Ordering).
 - No physics engine is used — ball positions are computed entirely from path
   parameterization (`pathT`) and chain logic, then written directly to
   `mesh.position`.
@@ -1042,6 +1042,9 @@ type PathSegment =
 interface LevelPath {
   segments: PathSegment[];
   spawnPoint: Vec2;
+  // Waypoint z values resolved at load time from editorData.
+  // Each entry marks the arc length at which a ball should adopt that z.
+  zBreakpoints: { arcLen: number; z: number }[];
   // Pre-computed at load time by PathSystem.build():
   arcLengthLUT: { segIndex: number; localT: number; arcLen: number }[];
   totalLength: number;  // total arc length in pixels
@@ -1165,7 +1168,60 @@ interface Ball {
   color: BallColor;
   pathT: number;        // 0.0 = spawn point, 1.0 = skull
   powerUp: PowerUpType | null;
+  z: number;            // current render layer — updated when ball crosses a waypoint
 }
+```
+
+#### Z-ordering
+
+Paths can double back on themselves, causing balls at different `pathT` values
+to overlap on screen. Each ball carries a `z` value that controls which ball
+renders on top. Z has no effect on game logic — only rendering.
+
+**Rule: z is waypoint-driven.**
+
+Each waypoint in the level definition has a `z` value. When a ball's `pathT`
+crosses a waypoint, it adopts that waypoint's `z`. The ball holds that z until
+it crosses the next waypoint.
+
+**Default z:** If the map author does not set a waypoint's z explicitly, it
+defaults to the waypoint's index (0, 1, 2, ...). This means later waypoints
+are higher by default — balls farther along the path render on top — which is
+correct for most non-looping paths without any author effort.
+
+**Map editor override:** The author can set any waypoint's z to any integer
+value. This is how paths that double back are handled — the author assigns a
+lower z to the waypoint at the start of the overlapping segment so the earlier
+pass renders beneath the later one.
+
+```json
+{
+  "editorData": {
+    "waypoints": [
+      { "pos": [50, 300],  "z": 0 },
+      { "pos": [350, 300], "z": 1 },
+      { "pos": [200, 150], "z": 2 },
+      { "pos": [350, 300], "z": 0 },   // path doubles back — explicitly lower z
+      { "pos": [650, 300], "z": 1 }
+    ]
+  }
+}
+```
+
+At render time, `ChainRenderer` sorts all balls by `z` ascending before
+submitting draw calls (lower z drawn first, higher z drawn on top):
+
+```typescript
+// ChainRenderer.sync()
+const sorted = [...chain.balls].sort((a, b) => a.z - b.z);
+sorted.forEach((ball, i) => {
+  mesh.renderOrder = i;
+});
+```
+
+**Ball z is updated each tick** by `BallChain.update()` — after moving each
+ball, check whether it has crossed into the next waypoint's segment and update
+`ball.z` if so.
 ```
 
 #### Push-from-back movement
