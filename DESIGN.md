@@ -2,7 +2,7 @@
 
 **Project:** ball-chain-clone  
 **Reference Game:** Zuma Deluxe (PopCap Games, 2003)  
-**Document Version:** 1.0  
+**Document Version:** 1.2  
 **Date:** 2026-04-03
 
 ---
@@ -14,15 +14,18 @@
 3. [Game Objects](#3-game-objects)
 4. [Controls](#4-controls)
 5. [Level Design](#5-level-design)
-6. [Power-Ups and Special Balls](#6-power-ups-and-special-balls)
-7. [Scoring System](#7-scoring-system)
-8. [Win / Lose Conditions](#8-win--lose-conditions)
-9. [Game Modes](#9-game-modes)
-10. [Progression System](#10-progression-system)
-11. [Audio / Visual Style](#11-audio--visual-style)
-12. [Technical Architecture](#12-technical-architecture)
-13. [Milestones](#13-milestones)
-14. [Open Questions](#14-open-questions)
+6. [Map Editor](#6-map-editor)
+7. [Power-Ups and Special Balls](#7-power-ups-and-special-balls)
+8. [Scoring System](#8-scoring-system)
+9. [Win / Lose Conditions](#9-win--lose-conditions)
+10. [Game Modes](#10-game-modes)
+11. [Progression System](#11-progression-system)
+12. [Audio / Visual Style](#12-audio--visual-style)
+13. [Technical Architecture](#13-technical-architecture)
+14. [Testing Strategy](#14-testing-strategy)
+15. [Debug Mode](#15-debug-mode)
+16. [Milestones](#16-milestones)
+17. [Open Questions](#17-open-questions)
 
 ---
 
@@ -33,8 +36,8 @@ frog idol that rotates 360° and fires colored balls into a moving chain of ball
 Matching 3+ consecutive same-color balls removes them from the chain. The goal is
 to clear the chain before any ball reaches the skull at the path end.
 
-**Target platform:** Web browser (HTML5 Canvas)  
-**Proposed tech stack:** TypeScript + HTML5 Canvas (no heavy framework)  
+**Target platform:** Web browser (WebGL via Three.js)  
+**Proposed tech stack:** TypeScript + Three.js (no physics engine)  
 **Target audience:** Casual players familiar with match-3 / marble-shooter genres
 
 ---
@@ -67,8 +70,16 @@ Player rotates frog, aims, fires current ball
            No → any ball reached skull? → LOSE LIFE → retry / game over
 ```
 
-**Key tension mechanic:** The chain continuously accelerates. As balls near the
-skull the skull visually "opens," escalating urgency.
+**Key tension mechanic:** The chain continuously advances toward the skull.
+As the leading ball approaches, the skull visually opens across 5 states,
+escalating urgency. A careless insertion near the skull can push the head ball
+past `pathT = 1.0` and cost a life.
+
+**Cascade mechanic:** A pop opens a gap. The front segment zips back (away from
+skull) to close it. When the gap closes, if the newly adjacent balls form a 3+
+match, another pop triggers — and so on. The chain is frozen during zip-back;
+the player can still fire into zipping segments. There is no fire lockout at
+any point.
 
 ---
 
@@ -78,24 +89,54 @@ skull the skull visually "opens," escalating urgency.
 
 | Property | Value |
 |---|---|
-| Position | Fixed at level-defined anchor point (usually center) |
-| Rotation | 0–360°, follows mouse cursor / analog stick |
+| Position | Per-level `{x, y}` anchor defined in level JSON — may be off-center; independent of spawn point |
+| Rotation | 0–360°, instantaneous — follows mouse/touch with no smoothing lag |
+| Firing arc | Full 360°, no restriction |
 | Current ball | Displayed in frog's mouth |
 | Next ball | Displayed on frog's back |
+| Queue depth | 3 balls internally (current, next, reserve) — only current and next are displayed |
 | Swap | Player may swap current ↔ next at any time |
+| Fire animation | Single-frame shoot pose held for fire throttle duration, returns to idle |
+| Fire throttle | Fixed constant `FIRE_THROTTLE_MS` (tunable) — resets on each shot |
 
-The frog always holds two balls. When the current ball is fired, next ball becomes
-current and a new random ball is generated for next.
+**Ball queue:** The frog maintains a 3-ball internal queue. Only the current (mouth)
+and next (back) balls are shown. When the player fires:
+1. Current ball launches as projectile.
+2. Next → current (shown in mouth).
+3. Reserve → next (shown on back).
+4. New ball generated for reserve (not yet visible).
+
+**Smart color generation:** When `ballsRemaining > LOW_BALL_THRESHOLD` (default 10,
+counts all unpopped balls including not-yet-spawned), new balls are generated from
+the full color set for the level. When `ballsRemaining ≤ LOW_BALL_THRESHOLD`, new
+balls are restricted to colors still present among remaining unpopped balls —
+ensuring the player always has a useful shot in the final stretch.
+
+**Multiple projectiles:** Multiple balls can be in flight simultaneously. The fire
+throttle limits how quickly the player can fire but does not prevent a second
+projectile while the first is still travelling. Each projectile resolves
+independently on collision.
+
+**Swap mechanic:**
+- The player can swap current ↔ next at any time — including while projectiles
+  are in flight.
+- Swap only affects the queue; it has no effect on balls already in flight.
+  In-flight projectiles retain their original color regardless of swap.
+- Swap is not subject to the fire throttle — it can be triggered independently
+  at any time.
+- Swapping does not consume a ball or generate a new one — it only exchanges
+  the positions of current and next in the queue.
 
 ### 3.2 Ball Chain
 
-- Balls are stored as an ordered list with a `pathT` parameter (0.0 = spawn,
-  1.0 = skull) representing normalized distance along the Bézier/polyline path.
-- Each ball has: `color`, `pathT`, `radius`, `powerUp | null`.
-- The chain advances at a base speed that scales with level number.
-- Chain speed increases slightly after each ball group is popped (brief pullback
-  first, then resume).
-- A **reverse** event can push `pathT` backward temporarily.
+- Balls are stored as an ordered list sorted by `pathT` ascending (index 0 = tail
+  at spawn, last index = head at skull).
+- Each ball has: `color`, `pathT`, `powerUp | null`.
+- Balls only move forward because they are pushed from behind — no push means
+  stationary. See §12.6 for full movement model.
+- **Chain pauses** during any zip-back — spawner stops pushing until all
+  gap-closes complete.
+- Balls never move toward spawn except during zip-back or Reverse power-up.
 
 ### 3.3 Ball Colors
 
@@ -110,31 +151,63 @@ chains accidentally; more colors = deliberate aim required.
 
 ### 3.4 The Skull
 
-- Located at path end (pathT = 1.0).
-- Animated: mouth opens wider as the leading ball's `pathT` approaches 1.0.
-- Fully open at `pathT >= 0.90` (danger zone — audio cue fires).
-- When a ball enters (pathT > 1.0), all remaining balls follow and the player
-  loses a life.
+- Located at path end (`pathT = 1.0`). Responds to the **absolute leading ball** only.
+- 5 visual open states driven by leading ball `pathT`:
+
+| State | pathT range |
+|---|---|
+| Closed | < 0.75 |
+| Quarter open | 0.75 – 0.84 |
+| Half open | 0.84 – 0.89 |
+| Open | 0.89 – 0.95 |
+| Fully open | ≥ 0.95 |
+
+- When the head ball reaches `pathT >= 1.0`: the entire chain accelerates and
+  flushes into the skull (toilet-flush animation). All in-flight projectiles
+  disappear with animation. Life is decremented. Level restarts.
 
 ### 3.5 Projectile Ball
 
-- Fired from frog at a fixed speed in the aim direction.
-- Physics: straight-line travel, no gravity, no arc.
-- On collision with the chain, the ball inserts between the two nearest balls
-  along the path closest to the collision point.
-- On miss: ball disappears off-screen.
+- Fired from the frog's position (not the spawn point) in the aimed direction.
+- Straight-line travel, no arc, no gravity.
+- **Travels freely through the level** — path geometry and background art do not
+  block projectiles. Only chain balls are valid collision targets.
+- Circle-overlap collision detection against all chain balls each tick.
+- On miss: disappears off-screen. May be recycled into queue as optimization.
+- On level complete: disappears immediately when the last ball is popped.
+- On game over: all in-flight projectiles play disappear animation and are removed.
+- Multiple projectiles can be in flight simultaneously.
 
 ---
 
 ## 4. Controls
 
-### Mouse / Touch (primary)
+### Mouse (desktop)
 
 | Action | Input |
 |---|---|
-| Aim | Move mouse / drag touch toward target |
-| Fire | Left click / tap |
-| Swap balls | Right click / two-finger tap |
+| Aim | Move mouse — frog rotates to face cursor instantly |
+| Fire | Left click |
+| Swap balls | Right click |
+
+### Touch (mobile)
+
+| Action | Input |
+|---|---|
+| Aim + Fire | Tap anywhere — frog aims toward tap position and fires immediately |
+| Aim without firing | Drag finger — frog tracks finger position; ball fires on release |
+| Swap balls | Two-finger tap |
+
+**Touch behavior detail:**
+- A **tap** (touch down + up with minimal movement) aims toward the touch
+  position and fires in one gesture. The player doesn't need to aim first —
+  wherever they tap is where the ball goes.
+- A **drag** updates the aim angle in real time as the finger moves. The ball
+  fires when the finger is lifted. This gives the player fine-grained control
+  when precision matters.
+- The fire throttle applies to both tap and drag-release — if the throttle
+  hasn't elapsed since the last shot, the gesture is ignored.
+- Two-finger tap anywhere on screen swaps current and next ball.
 
 ### Keyboard (secondary)
 
@@ -150,19 +223,62 @@ chains accidentally; more colors = deliberate aim required.
 
 ### 5.1 Path System
 
-Paths are defined as a sequence of **cubic Bézier curve segments** or a
-**polyline** with smooth interpolation. At runtime the path is pre-sampled into
-an arc-length-parameterized lookup table so that balls travel at uniform screen
-speed regardless of curve curvature.
+Paths are authored as **waypoints** in the map editor and stored internally as
+a **series of cubic Bézier segments**. This gives authors an intuitive editing
+experience while giving the runtime a uniform, arbitrary-shape path representation.
 
-Each level JSON includes:
-- `path`: array of control points
-- `spawnInterval`: ms between new balls entering the chain
-- `chainLength`: total balls to spawn before the tail enters
-- `baseSpeed`: initial chain speed (path-units / second)
-- `speedAcceleration`: speed increase per second
-- `colors`: array of allowed colors for this level
-- `frogAnchor`: `{x, y}` position of frog on screen
+#### Authoring (map editor)
+
+- Author places `{x, y}` waypoints anywhere on screen.
+- By default each waypoint is auto-smoothed using **Catmull-Rom** interpolation
+  to generate Bézier control handles — no manual handle placement needed.
+- **Chord-length clamping** is applied automatically: control handles are clamped
+  to a maximum length proportional to the distance between neighboring waypoints.
+  This prevents overshooting, loops, and wild curves from closely-spaced or
+  sharp-angle waypoints.
+- Any waypoint can have its auto-generated handles **overridden manually** — the
+  author drags the handles to take full control of that segment. This is the
+  escape hatch for edge cases where auto-smoothing produces an undesirable shape.
+- The editor renders the resulting curve in **real time** as waypoints and handles
+  are moved, so authors see the exact ball path immediately.
+
+#### Storage (level JSON)
+
+The level JSON stores the **resolved Bézier segments**, not the raw waypoints.
+The editor writes segments; the runtime only ever reads segments. Waypoint
+metadata (handle override flags) is stored separately in an `editorData` block
+that the runtime ignores.
+
+```json
+{
+  "path": {
+    "segments": [
+      { "type": "cubic", "p0": [50,300], "p1": [120,100], "p2": [280,100], "p3": [350,300] },
+      { "type": "cubic", "p0": [350,300], "p1": [420,500], "p2": [580,500], "p3": [650,300] }
+    ]
+  },
+  "editorData": {
+    "waypoints": [
+      { "pos": [50,300],  "z": 0, "handleOverride": false },
+      { "pos": [350,300], "z": 1, "handleOverride": false },
+      { "pos": [650,300], "z": 2, "handleOverride": false }
+    ]
+  },
+  "spawnPoint": [50, 300],
+  "frogAnchor": [400, 270],
+  "chainLength": 80,
+  "minSpawnGap": 0,
+  "baseSpeed": 40,
+  "speedAcceleration": 0.5,
+  "colors": ["red", "green", "blue", "yellow"],
+  "powerUpFrequency": 0.08,
+  "aceTimeSeconds": 120,
+  "gapCloseSpeed": 320
+}
+```
+
+Note that `frogAnchor` and `spawnPoint` are **independent coordinates** —
+the frog can be anywhere on screen regardless of where the path starts.
 
 ### 5.2 Level Progression
 
@@ -186,39 +302,271 @@ either chain. Each chain has its own skull.
 
 ---
 
-## 6. Power-Ups and Special Balls
+## 6. Map Editor
 
-Power-up balls appear embedded in the chain with a glowing icon. Shooting any
-ball in the group containing a power-up collects it, but it only activates if
-the group pops (3+ match). Once activated, the effect applies immediately.
+The map editor is integrated into the game and accessible from the main menu.
+It is available in all builds. Custom levels are stored in IndexedDB and appear
+in the Play menu under a **Custom Levels** section.
 
-| Power-Up | Visual | Effect | Duration |
-|---|---|---|---|
-| **Slow** | Hourglass / snail | Halves chain speed | 10 s |
-| **Reverse** | Arrows pointing back | Pushes chain backward | 8 s |
-| **Lightning** | Lightning bolt | Destroys all balls matching the shot color | Instant |
-| **Laser** | Laser beam | Next fired ball pierces the entire chain, popping every matching-color ball in its path | 1 shot |
-| **Bomb** | Explosion icon | Destroys 7-ball radius around impact | Instant |
-| **Accuracy** | Target reticle | Shows exact insertion point and outcome preview | 15 s |
-| **Color Change** | Paint swirl | Converts a nearby cluster to a single color (random or aimed) | Instant |
+### 6.1 Navigation
 
-Multiple power-ups can be active simultaneously. Their timers run independently.
+```
+Main Menu
+  ├── Play
+  │     ├── Adventure
+  │     ├── Gauntlet
+  │     └── Custom Levels  ← play / edit / delete saved custom levels
+  ├── Create Level          ← opens map editor (new level)
+  └── Settings
+```
+
+From the Custom Levels screen, players can also:
+- **Edit** an existing custom level (opens it in the map editor)
+- **Share** a level (export JSON or copy share URL)
+- **Import** a level from JSON file or URL
+
+### 6.2 Editor Layout
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Toolbar: [ Add Waypoint ] [ Select ] [ Delete ]    │
+│           [ Frog ] [ Spawn ] [ Preview ] [ Save ]   │
+│           [ Share ▾ ]                               │
+├──────────────────────────────┬──────────────────────┤
+│                              │  Level Properties    │
+│                              │  ─────────────────   │
+│       Canvas (960×540)       │  name:   [My Level]  │
+│                              │  chainLength: [80]   │
+│   Path drawn in real time    │  baseSpeed:   [40]   │
+│   Waypoints as drag handles  │  minSpawnGap: [0]    │
+│   Frog icon draggable        │  colors: [✓R✓G✓B✓Y] │
+│   Spawn point draggable      │  aceTime: [120]      │
+│                              │  gapCloseSpeed:[320] │
+│                              │  powerUpFreq: [0.08] │
+└──────────────────────────────┴──────────────────────┘
+```
+
+### 6.3 Waypoint Editing
+
+- **Add waypoint:** Click canvas to append; Shift-click to insert between existing.
+- **Move waypoint:** Drag any anchor — curve updates in real time.
+- **Delete waypoint:** Select + Delete, or right-click → Remove.
+- **Auto-smooth handles:** Catmull-Rom with chord-length clamping by default.
+- **Manual handle override:** Drag a handle to override auto-smooth. A different
+  visual indicator marks overridden waypoints. Double-click handle to revert.
+- **Reorder waypoints:** Drag in the waypoint list panel.
+
+### 6.4 Special Point Placement
+
+- **Frog anchor:** Draggable frog sprite, stored as `frogAnchor`. Independent of path.
+- **Spawn point:** Draggable icon stored as `spawnPoint`. Typically path start
+  but not required.
+
+### 6.5 Live Preview
+
+- **Preview** button transitions directly into the game scene running the
+  current level — same engine, same canvas, no context switch.
+- The debug panel (§15) is available in preview so authors can tweak
+  `baseSpeed`, `minSpawnGap`, etc. in real time.
+- Pressing Escape exits preview and returns to the editor with state preserved.
+
+### 6.6 Saving
+
+- **Save** stores the level to **IndexedDB** under a user-provided name.
+- Levels are listed in the Custom Levels menu immediately after saving.
+- Auto-save triggers every 30 s while editing to prevent data loss.
+- The `editorData` block (waypoints + handle override flags) is stored alongside
+  the resolved segments so levels can be re-edited at any time.
+
+### 6.7 Sharing
+
+| Method | How |
+|---|---|
+| **Export JSON** | Downloads a `.json` file including `editorData`. Another player imports it via the Import button in Custom Levels. |
+| **Share URL** | The level JSON is compressed (LZ-string) and base64-encoded into a URL query parameter: `?level=<encoded>`. Opening the URL imports the level automatically. |
+| **Import JSON** | File picker — loads JSON into the editor or directly into Custom Levels. |
+
+### 6.8 Technical Notes
+
+- The editor is a **scene** (`EditorScene.ts`) in the same game bundle — no
+  separate entry point, no separate server.
+- Shares `PathSystem`, `BezierUtils`, `SpriteSheet`, and `InputManager` with
+  the game. The Three.js renderer and scene graph are reused.
+- `PathSystem.build()` runs on every waypoint change for the live preview.
+- IndexedDB access is wrapped in a small `LevelStore.ts` module with a clean
+  async API (`save`, `load`, `list`, `delete`).
+- URL sharing uses `lz-string` for compression — keeps URLs reasonably short
+  for typical level sizes.
 
 ---
 
-## 7. Scoring System
+## 7. Power-Ups and Special Balls
 
-### 7.1 Base Score
+### 7.1 Embedding and Activation
+
+Power-up balls are embedded directly in the chain as regular balls that also
+carry a `powerUp` tag. They look like normal colored balls but display a glowing
+icon overlay.
+
+**Activation rules:**
+- A power-up activates **only** when its ball is part of a group of 3+ that pops.
+- If its group is destroyed by a cascade (not a direct shot), it still activates.
+- If its group has fewer than 3 of the same color and doesn't pop, the power-up
+  ball stays in the chain — it is never "collected" without a pop.
+- Only one power-up per chain group. Groups are never seeded with two power-ups.
+
+**Spawn rules:**
+- `powerUpFrequency` (per-level JSON field, default `0.08`) is the probability
+  that any given ball spawned into the chain carries a power-up.
+- The type is chosen uniformly at random from the enabled set for that level
+  (early stages may exclude Laser and Bomb).
+- A minimum gap of 8 balls is enforced between consecutive power-up balls so
+  they don't cluster.
+
+### 7.2 Power-Up Reference
+
+#### Slow
+
+| Field | Value |
+|---|---|
+| Duration | 10 s |
+| Target | The chain it was embedded in |
+| Effect | Multiplies that chain's current speed by `0.5` |
+| Stacking | A second Slow resets the 10 s timer; speed multiplier does not compound |
+| Expiry | Speed ramps back to normal over 1 s (linear interpolation) |
+
+#### Reverse
+
+| Field | Value |
+|---|---|
+| Duration | 8 s |
+| Target | The chain it was embedded in |
+| Effect | Inverts chain velocity — chain moves backward (away from skull) |
+| Stacking | A second Reverse resets the 8 s timer |
+| Interaction with Slow | Both can be active simultaneously. Reverse takes priority on direction; speed is still halved if Slow is also active |
+| Expiry | Chain resumes forward motion at normal speed immediately on expiry |
+| Multi-chain | Only the chain containing the power-up ball is affected |
+
+#### Lightning
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | All chains |
+| Effect | Removes every ball in every chain whose color matches the **fired projectile's color** at the moment of activation |
+| No-match case | If no balls of that color exist in any chain, the power-up is consumed with no effect (shows a visual flash but nothing pops) |
+| Score | Each removed ball scores 10 pts; chain bonus applies as if they were popped sequentially |
+| Cascade | After removal, gaps are closed normally — if closing a gap creates a 3+ match, cascade proceeds as usual |
+
+#### Laser
+
+| Field | Value |
+|---|---|
+| Duration | 1 shot |
+| Target | Whichever chain the next projectile hits |
+| Effect | The next fired ball travels through the entire chain along its flight path, popping every ball it passes through whose color matches the laser ball's color |
+| Non-matching balls | Passed through without effect; they remain in the chain |
+| Insertion | The laser ball is NOT inserted into the chain; it passes through completely |
+| Score | Each popped ball scores normally; gap-shot multiplier applies for each gap the ball passes through |
+| Expiry | If the player swaps balls after Laser activates, the Laser effect transfers to the new current ball |
+| Miss | If the next shot misses the chain entirely, the Laser effect is consumed and lost |
+
+#### Bomb
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | The chain it was embedded in |
+| Effect | Removes all balls within a radius of 7 ball-widths from the bomb ball's position at the moment of pop |
+| Radius measurement | Physical screen distance, not index count — curved paths mean the radius may affect non-contiguous index ranges |
+| Score | Each removed ball scores 10 pts + chain bonus |
+| Cascade | Gaps close after removal; new matches trigger cascade |
+| Multi-chain | Does NOT affect other chains, even if physically nearby |
+
+#### Accuracy
+
+| Field | Value |
+|---|---|
+| Duration | 15 s |
+| Target | Player UI |
+| Effect | Renders a preview line showing where the current projectile will land and which ball it will insert next to; also highlights the resulting color group size |
+| Visual | Dotted trajectory line from frog to insertion point; affected ball group outlined |
+| Stacking | A second Accuracy resets the 15 s timer |
+| No gameplay effect | Purely informational; does not change chain or score behavior |
+
+#### Color Change
+
+| Field | Value |
+|---|---|
+| Duration | Instant |
+| Target | A cluster of balls around the activation point |
+| Effect | Converts all balls within 5 ball-widths of the power-up ball's position to a single color |
+| Color chosen | The color of the ball that completed the 3+ match triggering the pop (the fired ball's color) |
+| Result | The converted cluster may immediately form a 3+ match with neighbors, triggering a cascade |
+| Multi-chain | Only affects the chain the power-up was embedded in |
+
+### 7.3 Simultaneous Power-Ups
+
+Multiple power-ups can be active at the same time. Rules for simultaneous effects:
+
+| Combination | Behavior |
+|---|---|
+| Slow + Reverse | Both active: chain moves backward at half speed |
+| Two Slows | Timer resets; speed multiplier stays at 0.5 (no compounding) |
+| Two Reverses | Timer resets; direction still reversed |
+| Slow + Lightning | Lightning pops its targets; Slow continues unaffected |
+| Any timed + Instant | Instant resolves immediately; timed continues ticking |
+
+### 7.4 PowerUpSystem Internals
+
+```typescript
+interface ActivePowerUp {
+  type: PowerUpType;
+  chainIndex: number;   // which chain it belongs to (-1 = global)
+  remainingMs: number;  // 0 for instant (already resolved)
+}
+
+class PowerUpSystem {
+  private active: ActivePowerUp[] = [];
+
+  // Called by ChainManager when a group containing a power-up pops.
+  activate(type: PowerUpType, chainIndex: number, context: ActivationContext): void;
+
+  // Called each tick. Decrements timers, removes expired effects, returns
+  // any speed/direction overrides for ChainManager to apply.
+  update(dt: number): PowerUpOverrides;
+}
+
+interface PowerUpOverrides {
+  // Per-chain speed multipliers (1.0 = normal)
+  speedMultipliers: number[];
+  // Per-chain direction (-1 = reversed, 1 = forward)
+  directions: number[];
+  // Whether Accuracy overlay should render
+  showAccuracy: boolean;
+  // Whether next projectile should be a Laser shot
+  laserArmed: boolean;
+}
+```
+
+`GameLoop.tick()` calls `PowerUpSystem.update(dt)` and passes the returned
+`PowerUpOverrides` into `ChainManager.update(dt, overrides)` so chain movement
+is adjusted without `ChainManager` knowing anything about power-up state directly.
+
+---
+
+## 8. Scoring System
+
+### 8.1 Base Score
 
 | Event | Points |
 |---|---|
 | Ball popped (base) | 10 pts each |
 | Coin collected | 500 pts |
 
-### 7.2 Chain Bonus
+### 8.2 Chain Bonus
 
-Each successive pop **without missing or the chain stopping** increments the
-chain counter `n`. Bonus per pop group:
+Each successive pop increments the chain counter `n`. Bonus per pop group:
 
 ```
 chainBonus = 200 + (n × 10)
@@ -228,9 +576,25 @@ Examples:
 - 10th consecutive group: +300 pts
 - 20th consecutive group: +400 pts
 
-Chain counter resets on any miss or when no new pop occurs within 3 s.
+**Counter increments on:**
+- Any direct shot that causes a pop (3+ match).
+- Any cascade pop triggered by a gap close.
 
-### 7.3 Combo (Cascade) Bonus
+**Counter resets on:**
+- A fired ball that hits the chain but does **not** result in a pop (inserted
+  but no 3+ match formed).
+- A fired ball that misses the chain entirely.
+- The chain fully clearing (level complete) — counter resets for the next level.
+- A life lost — counter resets on level restart.
+
+A cascade sequence (multiple pops from one shot) increments `n` once per pop
+in the cascade — a 3-pop cascade increments `n` by 3.
+
+**Dual-chain levels:** The chain combo counter is **shared across both chains**.
+A pop on chain A followed by a pop on chain B continues the same counter — the
+player is not penalised for switching targets between chains.
+
+### 8.3 Combo (Cascade) Bonus
 
 When popping one group causes a gap that immediately triggers a second (or more)
 pop via chain reaction, each additional pop awards:
@@ -239,18 +603,24 @@ pop via chain reaction, each additional pop awards:
 comboBonus = previousGroupScore × 1.5  (cumulative per cascade level)
 ```
 
-### 7.4 Gap Shot Bonus
+### 8.4 Gap Shot Bonus
 
-Firing through a gap in the chain to hit balls further along awards a multiplier:
+A gap shot qualifies when the projectile passes through at least one gap wider
+than one ball diameter before hitting the chain. Each qualifying gap adds +1 to
+the multiplier:
 
 ```
-gapMultiplier = 1 + (number of gaps passed through)
+gapMultiplier = 1 + (number of qualifying gaps passed through)
+score = (ballsPopped × 10) × gapMultiplier
 ```
 
-The projectile must travel through at least one visible gap (ball spacing > ball
-diameter) to qualify.
+Gap multiplier stacks independently with chain bonus:
 
-### 7.5 Ace Time Bonus
+```
+totalScore = ((ballsPopped × 10) × gapMultiplier) + chainBonus
+```
+
+### 8.5 Ace Time Bonus
 
 If a level is cleared in under the "Ace Time" threshold (defined per level in
 JSON as `aceTimeSeconds`), a flat bonus is awarded:
@@ -259,25 +629,41 @@ JSON as `aceTimeSeconds`), a flat bonus is awarded:
 aceBonus = remainingSeconds × 100
 ```
 
-### 7.6 Extra Lives
+### 8.6 Extra Lives
 
 One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 8. Win / Lose Conditions
+## 9. Win / Lose Conditions
 
 ### 8.1 Win
 
-- All balls in the level's chain have been popped.
-- The Zuma bar (a progress meter filled by popping balls) reaches 100%.
+- All `chainLength` balls have been popped — the Zuma bar reaches 100%.
+- All in-flight projectiles **disappear immediately** when the last ball is
+  popped — they do not complete their flight.
 - Level complete screen shown; score tallied with bonuses.
 - Player advances to next level.
 
+**Zuma bar:**
+The Zuma bar is a progress meter displayed in the HUD. It fills as balls are
+popped and empties slightly when a life is lost (to reflect the level restarting).
+
+```
+zumaBarFill = ballsPopped / chainLength   (0.0 – 1.0)
+```
+
+- Increments by `1 / chainLength` for each ball popped (individually, not per
+  group — a 5-ball pop increments by `5 / chainLength`).
+- Cascade pops contribute normally — each ball in a cascade counts.
+- Resets to `0.0` when a life is lost and the level restarts.
+- Reaches `1.0` exactly when the last ball is popped — triggers level complete.
+
 ### 8.2 Lose (Life)
 
-- Any ball reaches pathT ≥ 1.0 (enters the skull).
-- All remaining chain balls are pulled in instantly.
+- Head ball reaches `pathT >= 1.0`.
+- Entire chain accelerates and flushes into the skull (toilet-flush animation).
+- All in-flight projectiles disappear with animation.
 - Player loses 1 life.
 - Level restarts from scratch.
 
@@ -295,7 +681,7 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 9. Game Modes
+## 10. Game Modes
 
 ### 9.1 Adventure Mode
 
@@ -326,36 +712,57 @@ One extra life awarded for every **50,000 points** accumulated.
 
 ---
 
-## 10. Progression System
+## 11. Progression System
 
-### 10.1 Save State (localStorage)
+### 10.1 Save State (IndexedDB)
 
+All persistent state is stored in IndexedDB via `LevelStore.ts`. There is no
+use of `localStorage`. Two object stores:
+
+**`playerProgress` store** — one record, keyed by `"progress"`:
 ```json
 {
   "highScore": 0,
-  "adventureProgress": {
-    "stage": 1,
-    "level": 1
-  },
+  "adventureProgress": { "stage": 1, "level": 1 },
   "gauntletUnlocked": false,
   "gauntletRank": "Rabbit",
   "totalScore": 0
 }
 ```
 
+**`customLevels` store** — one record per custom level, keyed by `levelId` (UUID):
+```json
+{
+  "id": "uuid",
+  "name": "My Level",
+  "createdAt": 1234567890,
+  "updatedAt": 1234567890,
+  "levelData": { ... }
+}
+```
+
 ### 10.2 Difficulty Tuning Knobs (per level JSON)
 
-- `baseSpeed` — starting chain velocity
-- `speedAcceleration` — rate of acceleration over time
-- `spawnInterval` — time between new balls entering
-- `chainLength` — total number of balls
-- `colors` — array of allowed ball colors (controls difficulty)
-- `powerUpFrequency` — ratio of balls that carry power-ups (0.0–1.0)
-- `aceTimeSeconds` — target clear time for ace bonus
+| Field | Description |
+|---|---|
+| `baseSpeed` | Starting `pushSpeed` in pixels/second |
+| `speedAcceleration` | Pixels/second² added each second: `pushSpeed += speedAcceleration * dt` |
+| `maxSpeed` | Speed cap — suggested default `3 × baseSpeed`. Speed never exceeds this |
+| `chainLength` | Total balls to spawn for the level — spawning stops once this count is reached |
+| `minSpawnGap` | Minimum additional spacing (pixels) beyond `minSpacing` before next ball spawns. Default `0` (spawn immediately when `minSpacing` is clear) |
+| `colors` | Array of allowed ball colors |
+| `powerUpFrequency` | Ratio of balls carrying a power-up (0.0–1.0, default 0.08) |
+| `aceTimeSeconds` | Target clear time for ace time bonus |
+| `gapCloseSpeed` | Speed of front-segment zip-back in pixels/second (default `8 × baseSpeed`) |
+| `lowBallThreshold` | Ball count below which smart color generation activates (default 10) |
+
+**Speed progression:** `pushSpeed` increases continuously from `baseSpeed` toward
+`maxSpeed` at rate `speedAcceleration` per second. Speed never resets mid-level —
+only on level restart after a life lost.
 
 ---
 
-## 11. Audio / Visual Style
+## 12. Audio / Visual Style
 
 ### 11.1 Visual Theme
 
@@ -384,171 +791,1019 @@ For our clone, we can use simplified flat/vector art with the same thematic cues
 
 ### 11.3 Audio Design
 
-- **BGM:** Loop of tribal / Mesoamerican-inspired ambient track (flutes, drums)
-- **Ball pop SFX:** Crisp stone-crack sound; pitch rises slightly with chain combo
-- **Skull warning:** Deep drum beat when leading ball enters danger zone
-- **Power-up collect:** Short chime / glyph-activation sound
-- **Level complete:** Triumphant horn fanfare
-- **Game over:** Low, slow drum sequence
-- **Zuma vocal cue:** Voice shout "Zumaaa!" on especially large chain clears (5+
-  balls in a single cascade)
+All audio implemented via Web Audio API with OGG / MP3 fallback.
 
-All audio can be implemented via Web Audio API with OGG / MP3 fallback.
+#### Continuous
+
+| Event | Sound |
+|---|---|
+| Gameplay BGM | Looping tribal / Mesoamerican ambient track (flutes, drums); fades on pause |
+
+#### Chain / ball events
+
+| Event | Sound |
+|---|---|
+| Ball fired | Short pop / thwack from frog |
+| Ball inserted, no match | Soft thud |
+| Group pop (3+) | Stone crack / burst; pitch scales with group size |
+| Cascade pop | Same as group pop; pitch increments slightly each cascade level |
+| Gap shot | Distinct swoosh as ball passes through gap |
+
+#### Skull events
+
+| Event | Sound |
+|---|---|
+| Skull quarter open | Single low drum beat |
+| Skull fully open | Urgent repeating pulse — continues until danger resolves |
+| Skull swallow (life lost) | Deep descending thud + drain sound |
+
+#### Power-up events
+
+| Event | Sound |
+|---|---|
+| Power-up embedded in chain | Subtle shimmer loop while ball exists in chain |
+| Power-up activated (any) | Distinct chime per type — 7 unique activation sounds |
+| Slow effect | Warping slow-down tone |
+| Reverse effect | Whoosh backward |
+| Lightning effect | Crack of electricity |
+| Laser effect | Sci-fi beam charge + fire |
+| Bomb effect | Explosion burst |
+| Accuracy effect | Soft focus chime |
+| Color Change effect | Magical shimmer sweep |
+
+#### Frog / queue
+
+| Event | Sound |
+|---|---|
+| Ball swap | Light click |
+| Fire throttle exhausted (too fast) | Short denied / dry thud |
+
+#### Progression
+
+| Event | Sound |
+|---|---|
+| Level complete | Triumphant horn fanfare |
+| Life lost | Short negative sting |
+| Game over | Slow ceremonial drum sequence |
+| Extra life earned | Ascending chime |
+| "Zuma!" vocal cue | Voice shout "Zumaaa!" — triggers on cascade of 5+ balls in a single chain reaction |
 
 ---
 
-## 12. Technical Architecture
+## 13. Technical Architecture
 
-### 12.1 Technology Stack
+### 13.1 Technology Stack
 
 | Layer | Choice | Rationale |
 |---|---|---|
 | Language | TypeScript | Type safety, good IDE support |
-| Renderer | HTML5 Canvas 2D | No dependencies, sufficient for 2D arcade game |
-| Build tool | Vite | Fast HMR, simple config |
-| Testing | Vitest | Co-located with Vite |
-| Asset pipeline | Static files in `/public` | Simple, no CMS needed |
+| Renderer | Three.js (WebGL) | Full 3D scene with PBR materials, lighting, depth buffer |
+| Camera | `THREE.OrthographicCamera` (default) or slight perspective — per level | Maintains classic top-down feel; perspective available for dramatic levels |
+| Build tool | Vite | Fast HMR, simple config; Three.js tree-shakes well |
+| Unit testing | Vitest | Co-located with Vite; fast, native ESM |
+| Coverage | Vitest + V8 provider | Target ≥ 90% line/branch coverage on all logic modules |
+| E2E testing | Playwright | Cross-browser, headless; tests major gameplay flows |
+| Physics engine | None | All motion is path-driven (no free-body simulation needed) |
+| 3D assets | GLTF/GLB for complex meshes (frog, skull); procedural Three.js geometry for balls and path | GLTF is the standard 3D web format; procedural geometry for simple shapes avoids asset loading overhead |
+| UI | HTML/CSS overlay for menus and HUD — not rendered in Three.js scene | Keeps UI accessible, easy to style, and decoupled from 3D renderer |
 
 ### 12.2 Module Breakdown
 
+**Architectural rule: game logic must have zero Three.js / DOM dependencies.**
+Only `Renderer`, `InputManager`, and `SpriteSheet` are allowed to import Three.js
+or reference browser globals. Every other module is a pure TypeScript class or
+function that can be imported directly in Vitest without a DOM environment.
+
 ```
 src/
-├── main.ts               # Entry point, canvas setup, game loop
-├── Game.ts               # Top-level state machine (menu / playing / paused / gameover)
+├── main.ts                    # Entry point — wires logic + renderer + input
+├── GameLoop.ts                # Deterministic tick engine (see §13.8)
+├── Game.ts                    # Top-level state machine (menu/editor/playing/paused/gameover)
+│
 ├── scenes/
-│   ├── MenuScene.ts
-│   ├── GameScene.ts      # Core gameplay
+│   ├── MenuScene.ts           # Main menu, custom levels list
+│   ├── GameScene.ts           # Core gameplay
+│   ├── EditorScene.ts         # Map editor (integrated, not separate bundle)
 │   └── GameOverScene.ts
-├── entities/
-│   ├── Frog.ts           # Shooter entity
-│   ├── Ball.ts           # Single ball data + render
-│   ├── BallChain.ts      # Ordered chain, insertion, pop, cascade logic
-│   ├── Projectile.ts     # In-flight ball
-│   └── Skull.ts          # End-of-path danger object
-├── systems/
-│   ├── PathSystem.ts     # Bézier / polyline, arc-length parameterization
-│   ├── CollisionSystem.ts# Projectile ↔ chain hit detection
-│   ├── MatchSystem.ts    # 3+ match detection, cascade resolution
-│   ├── ScoreSystem.ts    # All scoring rules
-│   └── PowerUpSystem.ts  # Power-up activation / timer management
+│
+├── logic/                     # Pure game logic — NO Three.js, NO DOM
+│   ├── ChainManager.ts        # Owns all BallChain instances; collision dispatch, all-cleared
+│   ├── BallChain.ts           # Single chain: movement, insertion, pop, cascade
+│   ├── Ball.ts                # Ball value type (color, pathT, powerUp, z)
+│   ├── MatchSystem.ts         # 3+ match detection, cascade resolution
+│   ├── ScoreSystem.ts         # All scoring rules, chain/combo/gap bonuses
+│   ├── PathSystem.ts          # Bézier segments, arc-length parameterization
+│   ├── CollisionSystem.ts     # Projectile ↔ chain hit detection
+│   ├── PowerUpSystem.ts       # Power-up activation and timer management
+│   ├── SpawnSystem.ts         # Ball spawning schedule
+│   ├── FrogState.ts           # Frog rotation, 3-ball queue state
+│   ├── ProjectileState.ts     # In-flight ball position/velocity
+│   └── SkullState.ts          # Path-end state and open-amount calculation
+│
+├── editor/
+│   ├── EditorState.ts         # Waypoints, handle overrides, level properties
+│   ├── WaypointSystem.ts      # Catmull-Rom smoothing, chord-length clamping
+│   └── LevelStore.ts          # IndexedDB CRUD (save/load/list/delete custom levels)
+│
+├── renderer/                  # All Three.js code — never imported by logic/
+│   ├── Renderer.ts            # THREE.WebGLRenderer, camera, scene, lighting rig
+│   ├── SceneBuilder.ts        # Constructs 3D temple environment from level data
+│   ├── BallMesh.ts            # SphereGeometry + MeshStandardMaterial per color
+│   ├── ChainRenderer.ts       # Syncs BallChain state → BallMesh positions
+│   ├── FrogRenderer.ts        # Loads frog GLTF, rotation animation
+│   ├── SkullRenderer.ts       # Loads skull GLTF, jaw open animation
+│   ├── PathRenderer.ts        # Renders 3D path channel/groove geometry
+│   ├── ProjectileRenderer.ts  # In-flight ball 3D mesh
+│   ├── ParticleRenderer.ts    # Pop particle effects (THREE.Points)
+│   └── EditorRenderer.ts      # Path curve, waypoint handles, frog/spawn icons
+│
 ├── input/
-│   └── InputManager.ts   # Mouse, touch, keyboard unified
+│   └── InputManager.ts        # Mouse, touch, keyboard → normalized InputState
+│
 ├── audio/
-│   └── AudioManager.ts   # Web Audio API wrapper
+│   └── AudioManager.ts        # Web Audio API wrapper
+│
+├── debug/
+│   ├── DebugOverlay.ts        # On-screen HTML panel (see §15)
+│   ├── DebugConfig.ts         # Runtime-editable settings store
+│   └── StepController.ts      # Pause/step/advance controls for game loop
+│
+├── assets/                    # 3D assets — loaded at runtime via GLTFLoader
+│   ├── frog.glb               # Frog idol mesh + animations
+│   ├── skull.glb              # Skull mesh + jaw morph targets
+│   └── temple-props.glb       # Columns, torches, wall sections (instanced)
+│
 ├── data/
-│   └── levels/           # Level JSON files (one per level)
+│   └── levels/                # Built-in levels (authored with map editor)
 │       ├── 1-1.json
-│       ├── 1-2.json
 │       └── ...
-├── ui/
-│   ├── HUD.ts            # Score, lives, Zuma bar
-│   └── LevelComplete.ts
+│
 └── utils/
-    ├── Vec2.ts           # 2D vector math
-    ├── BezierUtils.ts    # Curve sampling, arc-length LUT
-    └── Random.ts         # Seeded RNG
+    ├── Vec2.ts
+    ├── Vec3.ts                 # 3D vector math
+    ├── BezierUtils.ts
+    ├── LZString.ts             # Compression for URL-encoded level sharing
+    └── Random.ts               # Seeded, replaceable RNG (critical for test replay)
+
+tests/
+├── unit/                      # Vitest — pure logic tests, no DOM
+│   ├── logic/
+│   │   ├── ChainManager.test.ts
+│   │   ├── BallChain.test.ts
+│   │   ├── MatchSystem.test.ts
+│   │   ├── ScoreSystem.test.ts
+│   │   ├── PathSystem.test.ts
+│   │   ├── CollisionSystem.test.ts
+│   │   ├── PowerUpSystem.test.ts
+│   │   ├── SpawnSystem.test.ts
+│   │   └── FrogState.test.ts
+│   └── utils/
+│       ├── Vec2.test.ts
+│       └── BezierUtils.test.ts
+│
+├── integration/               # Vitest — multi-system scenarios, headless
+│   ├── GameLoop.test.ts       # Step-through simulation tests (see §13.3)
+│   └── LevelCompletion.test.ts
+│
+└── e2e/                       # Playwright
+    ├── gameplay.spec.ts       # Fire ball, match, score update
+    ├── powerups.spec.ts       # Each power-up activates and applies correctly
+    ├── skull.spec.ts          # Ball reaches skull → life lost
+    ├── levelcomplete.spec.ts  # Chain cleared → level complete screen
+    └── debug.spec.ts          # Debug panel opens, settings take effect
 ```
 
-### 12.3 Path Representation
+### 13.3 3D Scene and Assets
 
-Paths are stored as a flat array of points with a `type` flag per segment:
+The game world is fully 3D. There is no sprite pipeline, no SVG rasterization,
+and no texture atlases. All visual elements are Three.js geometry with PBR
+materials or loaded GLTF meshes.
+
+#### Asset types
+
+| Asset | Approach |
+|---|---|
+| **Balls** | Procedural `THREE.SphereGeometry` — one shared geometry, one `MeshStandardMaterial` per color |
+| **Frog** | GLTF/GLB — low-poly stone idol with idle and shoot animations |
+| **Skull** | GLTF/GLB — jaw-open morph targets for 5 open states |
+| **Path channel** | Procedural — `TubeGeometry` or extruded `CatmullRomCurve3` along path segments |
+| **Temple environment** | GLTF/GLB — modular props (columns, walls, torches) instanced across the scene |
+| **Power-up icons** | `THREE.PlaneGeometry` + `MeshBasicMaterial` with PNG texture, billboarded to camera |
+| **Particles** | `THREE.Points` with custom `BufferGeometry` |
+| **UI (HUD, menus)** | HTML/CSS overlay — not in the Three.js scene at all |
+
+#### Lighting rig
+
+```
+Scene lights:
+  AmbientLight         (intensity 0.4)  — base fill, Aztec warm tone
+  DirectionalLight     (intensity 1.0)  — simulated sun, top-down slight angle
+  PointLight × N       (intensity 0.6)  — one per torch prop in the environment
+  HemisphereLight      (sky: gold, ground: dark stone) — ambient color grading
+```
+
+Balls use `MeshStandardMaterial` with `roughness: 0.6`, `metalness: 0.1` —
+they look like carved stone marbles. Each color has a distinct `color` and
+subtle `emissive` glow to ensure readability under all lighting conditions.
+
+#### Ball colors (3D material values)
+
+| Color | `color` hex | `emissive` hex |
+|---|---|---|
+| Red | `#C0392B` | `#3d0000` |
+| Green | `#27AE60` | `#003d10` |
+| Blue | `#2980B9` | `#00103d` |
+| Yellow | `#F1C40F` | `#3d2f00` |
+| Purple | `#8E44AD` | `#25003d` |
+| White | `#ECF0F1` | `#1a1a1a` |
+
+#### Camera
+
+Default: `THREE.OrthographicCamera` — maintains the classic top-down Zuma feel.
+World units are set so 1 unit = 1 logical pixel at 960×540 base resolution.
+
+Levels can optionally specify `"camera": "perspective"` in their JSON to use a
+slight perspective projection (`THREE.PerspectiveCamera`, FOV 30°) for a more
+dramatic look on complex 3D levels.
+
+#### No sprite pipeline
+
+There is no build-time asset processing step. All assets are either:
+- Loaded at runtime via `THREE.GLTFLoader` (GLTF/GLB files in `assets/`)
+- Generated procedurally in Three.js at scene creation time
+
+No `SpriteSheet.ts`, no atlas JSON, no build script required.
+
+---
+
+### 12.4 Path Representation
+
+#### Runtime types
+
+The runtime only knows about Bézier segments — waypoints and editor metadata
+are never loaded by the game.
 
 ```typescript
 type PathSegment =
-  | { type: "line"; p0: Vec2; p1: Vec2 }
+  | { type: "line";  p0: Vec2; p1: Vec2 }
   | { type: "cubic"; p0: Vec2; p1: Vec2; p2: Vec2; p3: Vec2 };
 
 interface LevelPath {
   segments: PathSegment[];
-  // Pre-computed at load time:
-  arcLengthLUT: { t: number; arcLen: number }[];
-  totalLength: number;
+  spawnPoint: Vec2;
+  // Waypoint z values resolved at load time from editorData.
+  // Each entry marks the arc length at which a ball should adopt that z.
+  zBreakpoints: { arcLen: number; z: number }[];
+  // Pre-computed at load time by PathSystem.build():
+  arcLengthLUT: { segIndex: number; localT: number; arcLen: number }[];
+  totalLength: number;  // total arc length in pixels
 }
 ```
 
-`PathSystem.tFromArcLength(len)` maps a physical distance along the path to the
-normalized parameter `t ∈ [0, 1]`, enabling uniform-speed ball movement.
+#### Arc-length parameterization
 
-### 12.4 Chain Insertion Algorithm
+Bézier curves are not arc-length uniform — equal increments of the curve
+parameter `t` do not correspond to equal distances on screen. Without
+correction, balls speed up on straights and slow down on curves.
 
-1. Find nearest ball in chain to collision point (Euclidean distance).
-2. Determine whether inserted ball goes before or after nearest ball based on
-   which side of the ball the projectile came from along the path direction.
-3. Insert ball into chain array at computed index.
-4. Run `MatchSystem.checkMatches(insertionIndex)`: scan left and right from
-   insertion point for consecutive same-color balls.
-5. If count ≥ 3, mark group for removal, compute score, schedule cascade check.
-6. After removal, close gap: advance chain segment behind gap to meet chain
-   segment ahead. Check if new neighbors match → cascade.
+`PathSystem.build()` solves this at level load time by pre-sampling each
+segment at `N` subdivisions and building an arc-length lookup table (LUT).
+Each LUT entry records the cumulative arc length at a specific `(segIndex,
+localT)` point on the curve.
 
-### 12.5 Game Loop
+At runtime, moving a ball forward by `distance` pixels:
+
+```typescript
+// Convert current pathT to arc length
+currentArcLen = PathSystem.arcLenFromPathT(path, ball.pathT);
+
+// Advance by physical distance
+newArcLen = currentArcLen + distance;
+
+// Convert back to pathT via LUT (linear interpolation between entries)
+ball.pathT = PathSystem.pathTFromArcLen(path, newArcLen);
+```
+
+This ensures all balls travel at uniform screen speed regardless of curve shape.
+
+#### Screen position
+
+At render time, `PathSystem.positionAt(path, pathT)` evaluates the Bézier
+curve at the given parameter and returns `{x, y}` in screen coordinates.
+Balls never store screen positions — only `pathT`. Position is always derived.
+
+#### Authoring → runtime pipeline
+
+```
+Map editor
+  Author places waypoints
+  Auto-smoothing generates Bézier handles (Catmull-Rom + chord-length clamping)
+  Author optionally overrides handles manually
+  Live curve preview shown
+       ↓
+  Editor writes resolved segments to level JSON (editorData preserved separately)
+       ↓
+Runtime
+  PathSystem.load() reads segments array
+  PathSystem.build() computes arc-length LUT
+  Game loop uses pathT exclusively
+```
+
+### 12.5 ChainManager API
+
+`ChainManager` is the sole interface the rest of the game uses for anything
+chain-related. It owns 1–2 `BallChain` instances depending on the level definition
+and routes all calls to the correct one.
+
+```typescript
+class ChainManager {
+  private chains: BallChain[];
+
+  constructor(paths: LevelPath[], rng: Random) { ... }
+
+  // Advance all chains by dt milliseconds.
+  update(dt: number): void;
+
+  // Test a projectile against all chains. Returns the hit chain + insertion
+  // index, or null if no hit. GameLoop calls this; never calls BallChain directly.
+  checkCollision(projectile: ProjectileState): HitResult | null;
+
+  // Insert a ball into the chain identified by the HitResult.
+  insert(hit: HitResult, ball: Ball): void;
+
+  // True when every chain has been fully cleared.
+  allCleared(): boolean;
+
+  // The leading ball's pathT across all chains (used for skull animation).
+  maxPathT(): number;
+
+  // Apply a power-up effect to the relevant chain(s).
+  applyPowerUp(effect: PowerUpEffect): void;
+}
+
+interface HitResult {
+  chainIndex: number;   // which chain was hit
+  insertIndex: number;  // position within that chain's ball array
+  side: "before" | "after";
+}
+```
+
+`BallChain` itself remains a single-responsibility class with no knowledge of
+other chains. `ChainManager` is the only place multi-chain logic lives, keeping
+both classes easy to test independently.
+
+### 12.6 Chain Movement Model
+
+#### Orientation
+
+```
+SPAWN POINT  →  →  →  →  →  →  →  SKULL
+   pathT=0   [tail]  ...  [head]   pathT=1
+             (back)       (front)
+```
+
+- **Front / head** — the leading ball, highest `pathT`, closest to the skull.
+- **Back / tail** — the last spawned ball, lowest `pathT`, closest to spawn.
+- Balls travel from `pathT=0` toward `pathT=1` (spawn → skull).
+- The chain array is sorted by `pathT` ascending: `index 0 = tail`, `last index = head`.
+
+#### Ball representation
+
+Each ball is an independent object with its own `pathT`. There is no shared
+chain velocity — a ball only moves because something behind it pushes it.
+
+```typescript
+interface Ball {
+  color: BallColor;
+  pathT: number;        // 0.0 = spawn point, 1.0 = skull
+  powerUp: PowerUpType | null;
+  z: number;            // current render layer — updated when ball crosses a waypoint
+}
+```
+
+#### Z-ordering
+
+In full 3D, the WebGL depth buffer handles natural occlusion between objects
+in the scene. However, when a path doubles back on itself, two segments of the
+path are at the same world-space Y height and the depth buffer alone cannot
+determine which should appear on top — the author must specify this explicitly.
+
+**Rule: z is waypoint-driven and maps to world-space Y elevation.**
+
+Each waypoint has a `z` value (integer). `ball.z` is updated as the ball
+crosses waypoints. At render time `ChainRenderer` sets each ball mesh's
+`position.y` to `ball.z * LAYER_HEIGHT` (default `LAYER_HEIGHT = 0.5` units),
+physically elevating balls on higher-z segments above lower-z segments. The
+depth buffer then handles occlusion naturally — no `renderOrder` hacking needed.
+
+**Default z:** Waypoint index (0, 1, 2, ...) — later waypoints are higher,
+correct for most paths with no author effort.
+
+**Map editor override:** The author sets any waypoint's z to control layering
+on double-back paths — the earlier overlapping segment gets a lower z so it
+renders beneath the later pass.
+
+```json
+{
+  "editorData": {
+    "waypoints": [
+      { "pos": [50, 300],  "z": 0 },
+      { "pos": [350, 300], "z": 1 },
+      { "pos": [200, 150], "z": 2 },
+      { "pos": [350, 300], "z": 0 },   // path doubles back — explicitly lower
+      { "pos": [650, 300], "z": 1 }
+    ]
+  }
+}
+```
+
+```typescript
+// ChainRenderer.sync()
+chain.balls.forEach(ball => {
+  const pos = PathSystem.positionAt(path, ball.pathT);
+  mesh.position.set(pos.x, ball.z * LAYER_HEIGHT, pos.y);
+  // depth buffer handles which ball appears on top
+});
+```
+
+**Ball z is updated each tick** by `BallChain.update()` when a ball crosses
+a waypoint boundary. Z only affects rendering — no impact on game logic.
+
+#### Push-from-back movement
+
+The spawner pushes the tail ball forward by `pushSpeed * dt` each tick. A ball
+passes that push to the ball in front of it only when the gap between them
+reaches `minSpacing` (= 1 ball diameter in path units). If a gap exists ahead
+of a ball, that ball **does not move** — there is nothing in front to push
+against and nothing behind has reached it yet.
+
+```
+tick():
+  // Push tail forward from spawner
+  balls[0].pathT += pushSpeed * dt
+
+  // Propagate push through the chain toward the head
+  for i from 1 to lastIndex:
+    gap = balls[i].pathT - balls[i-1].pathT
+    if gap <= minSpacing:
+      // In contact — push propagates
+      balls[i].pathT = balls[i-1].pathT + minSpacing
+    else:
+      // Gap exists ahead — this ball and everything beyond it is stationary
+      break
+```
+
+Key consequences:
+- A **compressed segment** (no gaps within it) moves entirely at `pushSpeed`.
+- A **free-floating front segment** (gap behind it) is **stationary** — it
+  receives no push and does not move toward the skull on its own.
+- The front segment being stationary is **good for the player** — the leading
+  ball stops advancing toward the skull while the gap exists.
+
+#### Spawn system
+
+A new ball enters the chain at `pathT = 0` (the spawn point) when the current
+tail ball has moved at least `minSpacing + minSpawnGap` away from `pathT = 0`.
+This is purely distance-based — no timer involved.
+
+```
+SpawnSystem.update():
+  if ballsSpawned < chainLength:
+    tailArcLen = PathSystem.arcLenFromPathT(path, balls[0].pathT)
+    if tailArcLen >= minSpacing + minSpawnGap:
+      newBall = generateBall(rng, activeColors)
+      balls.unshift({ color: newBall, pathT: 0, powerUp: null })
+      ballsSpawned++
+```
+
+- At high `pushSpeed` the tail moves away quickly — balls enter more frequently,
+  producing a denser chain.
+- At low `pushSpeed` they enter less frequently — sparser chain.
+- `minSpawnGap` (default `0`) can introduce deliberate spacing between balls for
+  levels that want visible gaps in the incoming chain.
+- Spawning stops permanently once `ballsSpawned == chainLength`.
+- The spawner also pauses while any zip-back is in progress (consistent with
+  chain pause rule).
+
+#### Gap definition
+
+A gap exists between balls `i` and `i+1` when:
+
+```
+balls[i+1].pathT - balls[i].pathT > minSpacing
+```
+
+(where `i+1` is closer to the skull / head side)
+
+Gaps arise from two sources:
+1. **Spawn gaps** — the spawner emits balls only when the tail has moved far
+   enough; if `minSpawnGap > 0` a deliberate gap appears between each new ball
+   have not yet pushed into contact with the rest of the chain. These are
+   uncommon in practice but are treated identically to pop gaps — Case 2
+   applies if the balls on either side happen to be the same color.
+2. **Pop gaps** — when a group is removed, the front segment is no longer in
+   contact with the back segment and becomes stationary.
+
+#### Gap close rules
+
+A gap closes in exactly **two** cases:
+
+**Case 1 — Pop.**
+When a group of 3+ same-color balls is removed, a gap opens. The front segment
+is now stationary. The **front segment rushes backward** (toward the spawn
+point, away from the skull) at `gapCloseSpeed` to meet the stationary back
+segment.
+
+**Case 2 — Color match across a gap.**
+After every state change (insertion, pop, movement tick), every gap in the
+chain is checked. If the balls on **either side** of a gap are the same color,
+the gap triggers a close — the **front segment rushes backward** at
+`gapCloseSpeed` to meet the back segment, identical to Case 1. This applies
+to all gap types including spawn gaps.
+
+This check runs across **all gaps** every tick while any gap-close is in
+progress, not just the most recently created gap.
+
+#### Front segment zip-back
+
+When a gap-close triggers, the front segment moves **backward** (decreasing
+`pathT`) at `gapCloseSpeed` — a fixed constant, always the same speed
+regardless of chain speed, level, or gap size. This is the "zip back" the
+player sees — the leading balls visibly pulling away from the skull toward the
+spawn side. This is the primary moment of relief after a successful shot.
+
+`gapCloseSpeed` is much faster than `pushSpeed` to feel snappy. Suggested
+default: `gapCloseSpeed = 8 × pushSpeed` (tunable per level via `gapCloseSpeed`
+field in level JSON).
+
+```
+gapClose tick():
+  frontSegmentHead.pathT -= gapCloseSpeed * dt
+  // propagate backward through front segment (maintain minSpacing between all balls)
+  for each ball in front segment (head → tail direction):
+    maintain minSpacing from ball ahead
+```
+
+The back segment does **not** change speed during a gap close — it continues
+being pushed at `pushSpeed` from the spawner as normal.
+
+When the front segment's tail ball reaches `minSpacing` of the back segment's
+head ball, the gap is closed. The front segment stops its backward motion and
+resumes being pushed forward at `pushSpeed` by the back segment.
+
+**No minimum distance from skull** — zip-back applies even when the front
+segment is very close to `pathT=1.0`. The front segment zips back as far as
+needed to meet the back segment, even if it starts adjacent to the skull.
+
+**Reverse power-up interaction** — zip-back still applies when Reverse is
+active. If a gap-close triggers during Reverse, the front segment zips back
+at `gapCloseSpeed` regardless of the chain's current direction. Both motions
+are additive: the front segment moves backward both from the Reverse effect
+and from the zip-back simultaneously.
+
+#### Multiple simultaneous gaps
+
+Multiple gaps can exist and close simultaneously. Each gap-close is tracked
+independently — each has its own front segment zipping backward at
+`gapCloseSpeed`. A ball segment can only belong to one gap-close at a time.
+If a segment is already zipping and a second gap-close triggers on the same
+segment, the new close takes over (resets the zip).
+
+```typescript
+interface GapCloseState {
+  frontSegmentStartIndex: number;  // index of tail ball of the front segment
+  backSegmentEndIndex: number;     // index of head ball of the back segment
+  closing: boolean;
+}
+```
+
+---
+
+### 12.7 Chain Insertion Algorithm
+
+#### Step 1 — Find the hit ball
+
+The projectile is a moving circle. Each tick, test it against every ball in
+every chain. The **first ball whose circle overlaps the projectile circle** is
+the hit ball.
+
+#### Step 2 — Determine insert side (before or after the hit ball)
+
+**Primary rule:** Project the projectile's velocity vector onto the path tangent
+at the hit ball's `pathT`.
+
+- Dot product **> 0** (projectile travelling in same direction as chain, spawn→skull)
+  → insert **before** the hit ball (between hit ball and skull).
+- Dot product **< 0** (projectile coming from skull side)
+  → insert **after** the hit ball (between hit ball and spawn).
+
+**Fallback (dot product ≈ 0, near-perpendicular hit):** Use nearest neighbor.
+Whichever of the hit ball's two neighbors is physically closer to the collision
+point — insert between the hit ball and that neighbor.
+
+```
+SPAWN ──── [A] ──── [HIT] ──── [B] ──── SKULL
+
+Projectile from spawn side  →  insert between HIT and B  (before HIT)
+Projectile from skull side  →  insert between A and HIT  (after HIT)
+Near-perpendicular          →  insert toward nearest neighbor
+```
+
+#### Step 3 — Insert and push forward
+
+The inserted ball takes the `pathT` of the hit ball. The hit ball and the
+**entire front segment ahead of it** (toward skull) are shifted forward by
+`minSpacing` to make room.
+
+```
+Before:  ... [A] ──── [HIT] ──── [C] ──── [D=head] ──── SKULL
+
+After:   ... [A] ──── [NEW] ──── [HIT] ──── [C] ──── [D=head] ──── SKULL
+                           all shifted → toward skull
+```
+
+**Critical rule: balls never move toward the spawn point from insertion.**
+The back segment (spawn side of the insertion point) is completely untouched.
+Balls only ever move toward spawn via zip-back or the Reverse power-up — never
+from insertion.
+
+**Skull danger:** if shifting the front segment forward pushes the head ball to
+`pathT >= 1.0`, the skull condition triggers immediately — a game over results.
+Careless insertion near the skull is punished.
+
+The push propagates through the **entire front segment** — every ball from the
+hit ball to the head is shifted by `minSpacing`. It stops at any gap, since
+balls beyond a gap are not in contact.
+
+#### Step 4 — Match check
+
+Immediately after insertion, `MatchSystem` scans outward from the inserted
+ball's index in both directions, counting consecutive same-color balls
+(including the inserted ball).
+
+- Count **≥ 3** → group pops → gap opens → zip-back triggers (Case 1).
+- Count **< 3** → no pop. Run full-chain gap color-match scan (Case 2) in case
+  the insertion created a same-color match across an existing gap elsewhere.
+
+The match check is synchronous — it happens in the same tick as the insertion,
+with no delay.
+
+#### Simultaneous collisions
+
+Multiple projectiles can be in flight and may hit the chain in the same tick.
+When two or more projectiles collide with the chain in the same tick:
+
+- Collisions are processed **sequentially in projectile launch order** (oldest
+  projectile first).
+- Each insertion and its resulting match check, pop, and gap-close are fully
+  resolved before the next projectile collision is processed.
+- This means the second projectile may hit a chain that has already been
+  modified by the first — its insertion point is computed against the updated
+  chain state.
+- If two projectiles hit the **exact same ball** in the same tick, the first
+  (oldest) is processed normally. The second re-evaluates against the updated
+  chain after the first insertion; if its collision target no longer exists
+  (was popped), the projectile is treated as a miss.
+
+---
+
+### 12.8 Game Loop
+
+The loop is split into two independent concerns: **simulation** (pure, deterministic)
+and **rendering** (Three.js, side-effectful). This separation makes every logic
+path unit-testable without a browser.
+
+#### GameLoop.ts — the tick engine
+
+```typescript
+interface TickInput {
+  aimAngle: number;       // radians from frog to pointer
+  fire: boolean;          // true for exactly one tick when fire button pressed
+  swap: boolean;          // true for exactly one tick when swap pressed
+}
+
+interface GameState {
+  chains: ChainManager;
+  frog: FrogState;
+  projectiles: ProjectileState[];  // multiple in-flight simultaneously
+  score: ScoreState;
+  powerUps: ActivePowerUp[];
+  skull: SkullState;
+  fireThrottleMs: number;          // countdown to next allowed shot
+  ballsRemaining: number;          // total unpopped balls (in-chain + unspawned)
+  rng: Random;                     // seeded — same seed == same game
+  tickCount: number;
+}
+
+class GameLoop {
+  // Advance the simulation by exactly `dt` milliseconds.
+  // Has NO side effects outside of returning the new state.
+  tick(state: GameState, input: TickInput, dt: number): GameState { ... }
+
+  // Step exactly one fixed tick (FIXED_DT = 16.67ms).
+  // Used by tests and the debug StepController.
+  step(state: GameState, input: TickInput): GameState {
+    return this.tick(state, input, FIXED_DT);
+  }
+}
+```
+
+- `tick()` is a **pure function** (no global state, no DOM).
+- All randomness flows through `state.rng` (seeded `Random`), so any game
+  can be replayed deterministically from `(seed, inputLog)`.
+- The RAF loop calls `tick()` with real `dt`; tests call `step()` with a fixed dt.
+
+#### Browser RAF loop (`main.ts`)
 
 ```
 requestAnimationFrame loop:
-  dt = clamp(now - lastTime, 0, 50ms)   // cap dt to avoid spiral of death
-  
-  InputManager.poll()
-  
-  if state == PLAYING:
-    BallChain.update(dt)      // advance pathT of all balls
-    Projectile.update(dt)     // move in-flight balls
-    CollisionSystem.check()   // projectile ↔ chain
-    SpawnSystem.update(dt)    // add new balls to chain head
-    PowerUpSystem.update(dt)  // tick timers
-    SkullSystem.check()       // leading ball pathT >= 1.0?
-    ScoreSystem.flush()       // commit pending score events
-  
-  Renderer.clear()
-  Renderer.drawBackground()
-  Renderer.drawPath()
-  Renderer.drawChain()
-  Renderer.drawProjectile()
-  Renderer.drawFrog()
-  Renderer.drawHUD()
+  dt = clamp(now - lastTime, 0, 50ms)     // cap to avoid spiral of death
+
+  if !debugConfig.paused:
+    input   = InputManager.poll()
+    state   = gameLoop.tick(state, input, dt)
+
+  renderer.sync(state)                     // write state → Three.js meshes
+  renderer.render()                        // three.js renderer.render(scene, cam)
+  debugOverlay.draw(state)                 // no-op unless debug mode enabled
+```
+
+**tick() ordering within a frame:**
+
+```
+1. Decrement fireThrottleMs
+2. Handle fire input (if fireThrottleMs <= 0, launch projectile, reset throttle)
+3. Handle swap input
+4. Move all in-flight projectiles
+5. Collision detection: each projectile vs all chains
+   → on hit: insert ball, run match check, trigger zip-back if pop
+6. if chains.anyZipping():
+     chains.updateZip(dt)       // advance zip-back animations
+     chains.checkGapClose()     // fire match check on any newly closed gaps
+     // spawner paused — no push
+   else:
+     chains.updatePush(dt)      // normal push-from-back movement
+     SpawnSystem.update(dt)     // emit new balls at tail
+7. PowerUpSystem.update(dt)
+8. SkullSystem.check()          // leading ball pathT >= 1.0?
+9. ScoreSystem.flush()
 ```
 
 ---
 
-## 13. Milestones
+## 14. Testing Strategy
 
-| Milestone | Deliverables |
+### 13.1 Philosophy
+
+- **Logic first, render never.** All game rules live in `src/logic/` with zero
+  Three.js or DOM dependencies. Any unit test can import and exercise them without
+  a browser environment.
+- **Tests encode the rules.** Each mechanic in §2–§8 of this document has a
+  corresponding test. If a rule isn't tested, it isn't implemented.
+- **Coverage gate: ≥ 90% lines and branches** on all files under `src/logic/`
+  and `src/utils/`. Enforced in CI; PRs fail if coverage drops below threshold.
+- **Deterministic replay.** The seeded `Random` class and pure `GameLoop.tick()`
+  mean any test can reproduce an exact game sequence by supplying a seed and
+  input log.
+
+### 13.2 Unit Tests (Vitest)
+
+Each `logic/` module has a co-located test file in `tests/unit/logic/`. Tests
+cover every public method and every branch condition.
+
+**Representative test cases per module:**
+
+| Module | Key test cases |
 |---|---|
-| **M0 — Scaffold** | Vite + TypeScript project, Canvas setup, game loop, input handling |
-| **M1 — Path & Chain** | PathSystem with arc-length parameterization, BallChain rendering and movement |
-| **M2 — Shooter** | Frog rendering, aim rotation, projectile firing, ball swapping |
-| **M3 — Matching** | Collision detection, insertion algorithm, 3+ match detection and removal, cascade logic |
-| **M4 — Scoring & HUD** | Score system (base, chain, combo, gap shot), HUD display, lives system |
-| **M5 — Win/Lose** | Skull mechanic, level complete flow, game over screen, restart |
-| **M6 — Power-Ups** | All 7 power-up types, embedded in chain, activation logic |
-| **M7 — Levels** | Level JSON format, 13+ level definitions covering Stages 1–4 |
-| **M8 — Game Modes** | Adventure save/load, Gauntlet mode with Practice + Survival, rank system |
-| **M9 — Audio/Visual** | Canvas art (stone theme), BGM loop, SFX, Zuma vocal cue |
-| **M10 — Polish** | Particle effects on pops, smooth interpolation, mobile touch support, perf tuning |
+| `BallChain` | Insert ball at head/middle/tail; correct pathT ordering maintained; gap closes after pop; speed ramp applied correctly |
+| `MatchSystem` | 3-match pops; 2-match doesn't pop; cascade after gap close; cascade terminates when no new match; single-color chain cleared entirely |
+| `ScoreSystem` | Base 10 pts/ball; chain bonus formula at n=1,10,20; combo multiplier per cascade level; gap shot multiplier; ace time bonus; extra life thresholds |
+| `PathSystem` | Arc-length LUT monotonically increasing; `tFromArcLength` round-trips; position at t=0 == path start; position at t=1 == path end; uniform speed despite curvature |
+| `CollisionSystem` | Direct hit registers; near-miss doesn't register; insertion index correct for front/back of nearest ball; two-chain level targets correct chain |
+| `PowerUpSystem` | Each power-up activates on pop; effect applied; timer expires correctly; multiple simultaneous power-ups each expire independently |
+| `SpawnSystem` | Balls spawn at correct interval; correct color distribution; spawn stops after `chainLength` balls |
+| `FrogState` | `aimAngle` updated from input; fire produces projectile with correct velocity; swap exchanges current/next; next ball replaced after fire |
+
+### 13.3 Integration / Step-Through Tests (Vitest)
+
+`tests/integration/GameLoop.test.ts` drives the full simulation headlessly using
+`GameLoop.step()`. These tests verify multi-system interactions that can't be
+checked by unit-testing a single module.
+
+**Pattern:**
+
+```typescript
+it("clears a 3-ball chain in 1 shot", () => {
+  const state = buildState({
+    chain: [ball("red"), ball("red"), ball("red")],
+    frog: { currentBall: ball("red"), aimAngle: angleToChain },
+    seed: 42,
+  });
+
+  let s = state;
+  s = gameLoop.step(s, { fire: true, swap: false, aimAngle: s.frog.aimAngle });
+  // advance enough ticks for projectile to travel and collide
+  for (let i = 0; i < 30; i++) s = gameLoop.step(s, noInput);
+
+  expect(s.chain.balls).toHaveLength(0);
+  expect(s.score.total).toBe(30 + 200); // 3×10 + chain bonus at n=1
+});
+```
+
+**Key step-through scenarios:**
+
+- Single shot clears 3-ball chain; score correct.
+- Shot inserts into middle; no match; chain continues.
+- Cascade: popping group A creates gap → group B match → second pop.
+- Power-up embedded in chain; popping the group activates it.
+- Skull reached: life decremented, state reset to level start.
+- Full level: all balls cleared → `state.phase == "levelComplete"`.
+- Seeded replay: same `(seed, inputLog)` produces identical final `state`.
+
+### 13.4 End-to-End Tests (Playwright)
+
+Playwright tests run the built app in a headless Chromium browser. They drive
+input via mouse events and assert on visible DOM/canvas state (or data attributes
+written by the renderer for testability).
+
+**Test files:**
+
+| File | Scenarios covered |
+|---|---|
+| `gameplay.spec.ts` | Page loads; frog visible; click fires ball; score increments on match |
+| `powerups.spec.ts` | Each of the 7 power-ups appears in chain, is collected, effect visible |
+| `skull.spec.ts` | Letting chain reach skull loses a life; HUD life count decrements |
+| `levelcomplete.spec.ts` | Clearing the chain shows level-complete overlay |
+| `debug.spec.ts` | `?debug=1` URL param shows debug panel; speed slider changes chain speed |
+
+**Testability hooks for Playwright:**
+
+The renderer writes key game state to `data-*` attributes on the canvas wrapper:
+
+```html
+<div id="game-root"
+  data-score="1240"
+  data-lives="3"
+  data-phase="playing"
+  data-chain-length="14">
+  <canvas id="game-canvas"></canvas>
+</div>
+```
+
+Playwright assertions use these instead of pixel-sniffing:
+
+```typescript
+await expect(page.locator("#game-root")).toHaveAttribute("data-lives", "2");
+```
+
+### 13.5 Coverage Configuration
+
+`vitest.config.ts`:
+```typescript
+coverage: {
+  provider: "v8",
+  include: ["src/logic/**", "src/utils/**"],
+  exclude: ["src/renderer/**", "src/debug/**"],
+  thresholds: {
+    lines: 90,
+    branches: 90,
+    functions: 90,
+  },
+  reportsDirectory: "coverage",
+}
+```
 
 ---
 
-## 14. Open Questions
+## 15. Debug Mode
 
-1. **Art assets:** Create original vector art, use placeholder colored circles, or
-   commission/find CC-licensed sprites? Suggest starting with colored circles and
-   adding art in M9.
+Debug mode is activated by the URL parameter `?debug=1` or by pressing
+`` ` `` (backtick) at runtime. It adds an on-screen panel and enables
+step-through controls without affecting the production build.
 
-2. **Mobile support priority:** Full touch support or desktop-first?
+### 14.1 Debug Panel (`DebugOverlay.ts`)
 
-3. **Dual-track implementation:** Should both chains share a single `BallChain`
-   manager or have two independent instances? (Recommend two instances.)
+A semi-transparent HTML overlay (positioned over the canvas) with:
 
-4. **Difficulty balancing:** Exact `baseSpeed` and `spawnInterval` values need
+| Control | Type | Effect |
+|---|---|---|
+| **Pause / Resume** | Button | Freezes `GameLoop.tick()` |
+| **Step** | Button | Advances exactly one tick (`FIXED_DT`) while paused |
+| **Step N** | Number + Button | Advances N ticks in one click |
+| **Chain speed** | Slider (0.1× – 5×) | Multiplies `baseSpeed` at runtime |
+| **Spawn interval** | Slider (100ms – 5000ms) | Overrides level spawn rate |
+| **Ball colors** | Checkboxes | Restrict active color set |
+| **Force power-up** | Dropdown + Button | Injects chosen power-up into next ball |
+| **God mode** | Checkbox | Skull never triggers game over |
+| **Show path** | Checkbox | Renders the Bézier path curve |
+| **Show pathT** | Checkbox | Renders each ball's `pathT` value as text |
+| **Show hitboxes** | Checkbox | Renders collision radii |
+| **Seed** | Text input | Set `state.rng` seed; restart level to take effect |
+| **Export state** | Button | Copies `JSON.stringify(state)` to clipboard |
+| **Import state** | Button | Paste JSON to restore exact game state |
+
+### 14.2 Step Controller (`StepController.ts`)
+
+When paused, every call to the RAF loop skips `gameLoop.tick()` unless a step
+was requested. The renderer still runs each frame so the canvas stays live.
+
+```typescript
+class StepController {
+  paused = false;
+  private pendingSteps = 0;
+
+  requestStep(n = 1): void { this.pendingSteps += n; }
+
+  // Called by main.ts each RAF frame instead of tick() directly
+  maybeTick(state: GameState, input: TickInput): GameState {
+    if (!this.paused) return gameLoop.tick(state, input, realDt);
+    if (this.pendingSteps > 0) {
+      this.pendingSteps--;
+      return gameLoop.step(state, input);
+    }
+    return state;  // frozen
+  }
+}
+```
+
+### 14.3 DebugConfig (`DebugConfig.ts`)
+
+A singleton store of all runtime-overridable values. Systems read from it when
+the value is set, falling back to the level JSON default otherwise.
+
+```typescript
+interface DebugConfig {
+  enabled: boolean;
+  paused: boolean;
+  speedMultiplier: number | null;
+  minSpawnGap: number | null;
+  restrictColors: BallColor[] | null;
+  godMode: boolean;
+  showPath: boolean;
+  showPathT: boolean;
+  showHitboxes: boolean;
+  forcedPowerUp: PowerUpType | null;
+}
+```
+
+Debug mode is excluded from production bundles via Vite's `import.meta.env.DEV`
+guard — the `debug/` modules tree-shake out entirely in production builds.
+
+---
+
+## 16. Milestones
+
+**MVP goal: one fully playable level with complete gameplay mechanics and polished 3D art.**
+Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced from M2 onward.
+
+| Milestone | Deliverables | MVP? |
+|---|---|---|
+| **M0 — Scaffold** | Vite + TypeScript + Three.js, orthographic scene, deterministic `GameLoop`, seeded `Random`, mouse + touch `InputManager`, Vitest + Playwright configured, CI coverage check | Yes |
+| **M1 — 3D Assets** | `frog.glb`, `skull.glb` (5 open states), `temple-props.glb` authored/sourced; `THREE.GLTFLoader` asset pipeline; procedural `SphereGeometry` balls with PBR materials; `TubeGeometry` path channel; lighting rig (ambient + directional + hemisphere) | Yes |
+| **M2 — Path & Chain** | `PathSystem` (Bézier, arc-length LUT) + unit tests; `BallChain` (movement, spawn, speed ramp) + unit tests; chain rendered in Three.js with correct Z elevation | Yes |
+| **M3 — Shooter** | `FrogState` + unit tests; `ProjectileState` + unit tests; `CollisionSystem` + unit tests; frog mesh + aim rotation | Yes |
+| **M4 — Matching** | `MatchSystem` (3+ match, cascade) + unit tests; step-through integration tests for single-shot clear and cascade scenarios | Yes |
+| **M5 — Scoring & HUD** | `ScoreSystem` (all bonus types) + unit tests; HTML/CSS HUD overlay (score, lives, Zuma bar) | Yes |
+| **M6 — Win/Lose** | `SkullState` + unit tests; skull GLTF animation states; level-complete and game-over screens; life loss / retry flow + integration tests | Yes |
+| **M7 — Power-Ups** | `PowerUpSystem` (all 7 types) + unit tests; chain embedding; activation effects; integration tests for each power-up | Yes |
+| **M8 — Debug Mode** | `DebugOverlay`, `StepController`, `DebugConfig`; all debug controls functional; Playwright `debug.spec.ts` | Yes |
+| **M9 — E2E & Polish** | Full Playwright suite; particle effects (`ParticleRenderer`); camera shake; responsive canvas; mobile QA; coverage report ≥ 90% confirmed | Yes |
+| **M10 — Map Editor** | Integrated `EditorScene` (main menu option, all builds); waypoint placement; auto-smooth with chord-length clamping; manual handle override; frog + spawn point placement; Z breakpoint editing; live 3D preview; IndexedDB storage; JSON export/import; URL-encoded sharing | Post-MVP |
+| **M11 — Multi-Level** | 13+ levels authored in map editor, stage progression, save state | Post-MVP |
+| **M12 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
+| **M13 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
+
+---
+
+## 17. Open Questions
+
+1. **Art assets:** Full 3D — GLTF/GLB meshes for frog, skull, and props; procedural
+   `SphereGeometry` for balls; `TubeGeometry` for path channel; PBR materials
+   throughout. No sprite pipeline, no SVG rasterization. (Resolved — see §13.3.)
+
+2. **Mobile support priority:** Full touch support is in scope. Touch controls implemented in M0 (`InputManager`) and tested throughout. Three.js renders to a `<canvas>` element which works natively on mobile. (Resolved.)
+
+3. **Dual-track implementation:** `ChainManager` owns all `BallChain` instances
+   for a level and is the sole interface for collision dispatch, insertion, power-up
+   application, and all-cleared checks. `BallChain` stays single-responsibility.
+   (Resolved — see §12.5.)
+
+4. **Difficulty balancing:** Exact `baseSpeed` and `minSpawnGap` values need
    empirical playtesting — initial numbers in level JSONs are estimates.
 
-5. **Continues / payment:** Free continues or limited? (Out of scope for MVP;
-   default to no limit.)
+5. **Continues / payment:** Unlimited continues. (Resolved.)
 
-6. **Network features:** High score leaderboard? (Out of scope for MVP; suggest
-   localStorage only.)
+6. **Network features:** No leaderboard. Scores and progress stored in IndexedDB
+   alongside custom levels. (Resolved.)
 
-7. **Level editor:** Built-in path editor tool for designers? (Out of scope for
-   MVP; use JSON directly.)
+7. **Level editor:** Integrated into the game as `EditorScene` — accessible from
+   the main menu in all builds. (Resolved — see §6.)
 
 8. **License / naming:** Avoid "Zuma" in the final product name to prevent
    trademark issues. Current repo name "ball-chain-clone" works as a codename.
+
+9. **Physics engine:** All ball motion is path-driven so a physics engine is not
+   needed for core gameplay. Potential use cases if added later: projectile
+   ricochets, particle debris on pop, environmental elements. Candidates if
+   needed: Rapier (Rust/WASM, excellent perf) or Matter.js (pure JS, simpler).
+   Current plan: no physics engine. (Resolved.)
