@@ -852,18 +852,20 @@ All audio implemented via Web Audio API with OGG / MP3 fallback.
 
 ## 13. Technical Architecture
 
-### 12.1 Technology Stack
+### 13.1 Technology Stack
 
 | Layer | Choice | Rationale |
 |---|---|---|
 | Language | TypeScript | Type safety, good IDE support |
-| Renderer | Three.js (WebGL) | Hardware-accelerated 2D via orthographic camera; built-in sprite, texture, and scene-graph support |
+| Renderer | Three.js (WebGL) | Full 3D scene with PBR materials, lighting, depth buffer |
+| Camera | `THREE.OrthographicCamera` (default) or slight perspective — per level | Maintains classic top-down feel; perspective available for dramatic levels |
 | Build tool | Vite | Fast HMR, simple config; Three.js tree-shakes well |
 | Unit testing | Vitest | Co-located with Vite; fast, native ESM |
 | Coverage | Vitest + V8 provider | Target ≥ 90% line/branch coverage on all logic modules |
 | E2E testing | Playwright | Cross-browser, headless; tests major gameplay flows |
 | Physics engine | None | All motion is path-driven (no free-body simulation needed) |
-| Asset pipeline | SVG sources → PNG textures via build script | Crisp at all resolutions, scriptable, version-controllable |
+| 3D assets | GLTF/GLB for complex meshes (frog, skull); procedural Three.js geometry for balls and path | GLTF is the standard 3D web format; procedural geometry for simple shapes avoids asset loading overhead |
+| UI | HTML/CSS overlay for menus and HUD — not rendered in Three.js scene | Keeps UI accessible, easy to style, and decoupled from 3D renderer |
 
 ### 12.2 Module Breakdown
 
@@ -875,7 +877,7 @@ function that can be imported directly in Vitest without a DOM environment.
 ```
 src/
 ├── main.ts                    # Entry point — wires logic + renderer + input
-├── GameLoop.ts                # Deterministic tick engine (see §13.6)
+├── GameLoop.ts                # Deterministic tick engine (see §13.8)
 ├── Game.ts                    # Top-level state machine (menu/editor/playing/paused/gameover)
 │
 ├── scenes/
@@ -887,7 +889,7 @@ src/
 ├── logic/                     # Pure game logic — NO Three.js, NO DOM
 │   ├── ChainManager.ts        # Owns all BallChain instances; collision dispatch, all-cleared
 │   ├── BallChain.ts           # Single chain: movement, insertion, pop, cascade
-│   ├── Ball.ts                # Ball value type (color, pathT, powerUp)
+│   ├── Ball.ts                # Ball value type (color, pathT, powerUp, z)
 │   ├── MatchSystem.ts         # 3+ match detection, cascade resolution
 │   ├── ScoreSystem.ts         # All scoring rules, chain/combo/gap bonuses
 │   ├── PathSystem.ts          # Bézier segments, arc-length parameterization
@@ -904,12 +906,15 @@ src/
 │   └── LevelStore.ts          # IndexedDB CRUD (save/load/list/delete custom levels)
 │
 ├── renderer/                  # All Three.js code — never imported by logic/
-│   ├── Renderer.ts            # Three.js WebGLRenderer, orthographic camera, scene
-│   ├── ChainRenderer.ts       # Syncs BallChain state → Three.js meshes
-│   ├── FrogRenderer.ts        # Frog mesh, rotation animation
-│   ├── SkullRenderer.ts       # Skull mesh, open-state animation
-│   ├── HUDRenderer.ts         # Score, lives, Zuma bar overlays
-│   ├── ParticleRenderer.ts    # Pop particle effects
+│   ├── Renderer.ts            # THREE.WebGLRenderer, camera, scene, lighting rig
+│   ├── SceneBuilder.ts        # Constructs 3D temple environment from level data
+│   ├── BallMesh.ts            # SphereGeometry + MeshStandardMaterial per color
+│   ├── ChainRenderer.ts       # Syncs BallChain state → BallMesh positions
+│   ├── FrogRenderer.ts        # Loads frog GLTF, rotation animation
+│   ├── SkullRenderer.ts       # Loads skull GLTF, jaw open animation
+│   ├── PathRenderer.ts        # Renders 3D path channel/groove geometry
+│   ├── ProjectileRenderer.ts  # In-flight ball 3D mesh
+│   ├── ParticleRenderer.ts    # Pop particle effects (THREE.Points)
 │   └── EditorRenderer.ts      # Path curve, waypoint handles, frog/spawn icons
 │
 ├── input/
@@ -918,14 +923,15 @@ src/
 ├── audio/
 │   └── AudioManager.ts        # Web Audio API wrapper
 │
-├── sprites/
-│   ├── SpriteSheet.ts         # THREE.Texture atlas loader + createMesh()
-│   └── SpriteAtlas.ts         # Atlas manifest type definitions
-│
 ├── debug/
-│   ├── DebugOverlay.ts        # On-screen panel (see §15)
+│   ├── DebugOverlay.ts        # On-screen HTML panel (see §15)
 │   ├── DebugConfig.ts         # Runtime-editable settings store
 │   └── StepController.ts      # Pause/step/advance controls for game loop
+│
+├── assets/                    # 3D assets — loaded at runtime via GLTFLoader
+│   ├── frog.glb               # Frog idol mesh + animations
+│   ├── skull.glb              # Skull mesh + jaw morph targets
+│   └── temple-props.glb       # Columns, torches, wall sections (instanced)
 │
 ├── data/
 │   └── levels/                # Built-in levels (authored with map editor)
@@ -934,6 +940,7 @@ src/
 │
 └── utils/
     ├── Vec2.ts
+    ├── Vec3.ts                 # 3D vector math
     ├── BezierUtils.ts
     ├── LZString.ts             # Compression for URL-encoded level sharing
     └── Random.ts               # Seeded, replaceable RNG (critical for test replay)
@@ -966,118 +973,66 @@ tests/
     └── debug.spec.ts          # Debug panel opens, settings take effect
 ```
 
-### 12.3 Sprite Pipeline
+### 13.3 3D Scene and Assets
 
-All visual assets are authored as SVG and rasterized to a single PNG spritesheet
-at build time. The Canvas renderer draws from this spritesheet exclusively —
-no raw SVG is rendered at runtime.
+The game world is fully 3D. There is no sprite pipeline, no SVG rasterization,
+and no texture atlases. All visual elements are Three.js geometry with PBR
+materials or loaded GLTF meshes.
 
-#### Source SVG layout
+#### Asset types
+
+| Asset | Approach |
+|---|---|
+| **Balls** | Procedural `THREE.SphereGeometry` — one shared geometry, one `MeshStandardMaterial` per color |
+| **Frog** | GLTF/GLB — low-poly stone idol with idle and shoot animations |
+| **Skull** | GLTF/GLB — jaw-open morph targets for 5 open states |
+| **Path channel** | Procedural — `TubeGeometry` or extruded `CatmullRomCurve3` along path segments |
+| **Temple environment** | GLTF/GLB — modular props (columns, walls, torches) instanced across the scene |
+| **Power-up icons** | `THREE.PlaneGeometry` + `MeshBasicMaterial` with PNG texture, billboarded to camera |
+| **Particles** | `THREE.Points` with custom `BufferGeometry` |
+| **UI (HUD, menus)** | HTML/CSS overlay — not in the Three.js scene at all |
+
+#### Lighting rig
 
 ```
-assets/
-└── sprites/
-    ├── balls/
-    │   ├── ball-red.svg
-    │   ├── ball-green.svg
-    │   ├── ball-blue.svg
-    │   ├── ball-yellow.svg
-    │   ├── ball-purple.svg
-    │   └── ball-white.svg
-    ├── powerups/
-    │   ├── powerup-slow.svg
-    │   ├── powerup-reverse.svg
-    │   ├── powerup-lightning.svg
-    │   ├── powerup-laser.svg
-    │   ├── powerup-bomb.svg
-    │   ├── powerup-accuracy.svg
-    │   └── powerup-colorchange.svg
-    ├── frog/
-    │   ├── frog-idle.svg
-    │   └── frog-shoot.svg       # 1-frame shoot pose
-    ├── skull/
-    │   ├── skull-closed.svg
-    │   ├── skull-quarter.svg
-    │   ├── skull-half.svg
-    │   ├── skull-open.svg
-    │   └── skull-full.svg
-    ├── ui/
-    │   ├── life-icon.svg
-    │   ├── zumabar-fill.svg
-    │   └── zumabar-bg.svg
-    └── bg/
-        └── temple-bg.svg        # Tileable or full-scene background
+Scene lights:
+  AmbientLight         (intensity 0.4)  — base fill, Aztec warm tone
+  DirectionalLight     (intensity 1.0)  — simulated sun, top-down slight angle
+  PointLight × N       (intensity 0.6)  — one per torch prop in the environment
+  HemisphereLight      (sky: gold, ground: dark stone) — ambient color grading
 ```
 
-#### Build script (`scripts/build-sprites.ts`)
+Balls use `MeshStandardMaterial` with `roughness: 0.6`, `metalness: 0.1` —
+they look like carved stone marbles. Each color has a distinct `color` and
+subtle `emissive` glow to ensure readability under all lighting conditions.
 
-Uses the `sharp` npm package (or `resvg-js`) to:
+#### Ball colors (3D material values)
 
-1. Render each SVG at a configurable base resolution (default: 2× for HiDPI).
-2. Pack all rendered PNGs into a single `public/spritesheet.png` using a
-   simple bin-packing algorithm (or `spritesmith`).
-3. Emit `public/spritesheet.json` — a TexturePacker-compatible atlas manifest:
+| Color | `color` hex | `emissive` hex |
+|---|---|---|
+| Red | `#C0392B` | `#3d0000` |
+| Green | `#27AE60` | `#003d10` |
+| Blue | `#2980B9` | `#00103d` |
+| Yellow | `#F1C40F` | `#3d2f00` |
+| Purple | `#8E44AD` | `#25003d` |
+| White | `#ECF0F1` | `#1a1a1a` |
 
-```json
-{
-  "frames": {
-    "ball-red": { "frame": { "x": 0,  "y": 0,  "w": 64, "h": 64 } },
-    "ball-green": { "frame": { "x": 64, "y": 0,  "w": 64, "h": 64 } },
-    "frog-idle":  { "frame": { "x": 0,  "y": 64, "w": 96, "h": 96 } }
-  },
-  "meta": {
-    "image": "spritesheet.png",
-    "size": { "w": 512, "h": 512 },
-    "scale": 2
-  }
-}
-```
+#### Camera
 
-4. Script runs as a Vite plugin hook (`buildStart`) so `vite build` and
-   `vite dev` both regenerate the sheet when SVGs change.
+Default: `THREE.OrthographicCamera` — maintains the classic top-down Zuma feel.
+World units are set so 1 unit = 1 logical pixel at 960×540 base resolution.
 
-#### Runtime usage with Three.js (`SpriteSheet.ts`)
+Levels can optionally specify `"camera": "perspective"` in their JSON to use a
+slight perspective projection (`THREE.PerspectiveCamera`, FOV 30°) for a more
+dramatic look on complex 3D levels.
 
-The spritesheet PNG is loaded once as a `THREE.Texture`. For each named frame,
-a `THREE.MeshBasicMaterial` is created with the shared texture and a UV offset /
-repeat that maps to that frame's region. Each game object owns a
-`THREE.Mesh` (with `PlaneGeometry`) or a `THREE.Sprite`, updated each frame by
-setting its `position` and `rotation` in world space.
+#### No sprite pipeline
 
-```typescript
-class SpriteSheet {
-  private texture: THREE.Texture;
-  private atlas: Atlas;
+There is no build-time asset processing step. All assets are either:
+- Loaded at runtime via `THREE.GLTFLoader` (GLTF/GLB files in `assets/`)
+- Generated procedurally in Three.js at scene creation time
 
-  async load(atlasUrl: string): Promise<void> { ... }
-
-  // Returns a material configured for the named frame.
-  // Caller owns the Mesh; call updateUVs() if the sprite frame changes.
-  createMaterial(name: string): THREE.MeshBasicMaterial { ... }
-
-  // Create a ready-to-add Mesh for a named sprite.
-  createMesh(name: string): THREE.Mesh { ... }
-}
-```
-
-- All ball, frog, skull, and UI objects are `THREE.Mesh` nodes in a single
-  orthographic scene.
-- The camera is a `THREE.OrthographicCamera` sized to the logical canvas
-  resolution (e.g. 960 × 540), so world units == pixels.
-- No perspective; z-ordering is handled by `mesh.renderOrder` driven by each ball's `ball.z` value (see §12.6 Z-Ordering).
-- No physics engine is used — ball positions are computed entirely from path
-  parameterization (`pathT`) and chain logic, then written directly to
-  `mesh.position`.
-
-#### SVG design conventions
-
-- Balls: 64 × 64 px viewBox, circular with Aztec/Mayan glyph overlay, stone
-  texture achieved with SVG filters (`feTurbulence` + `feComposite`).
-- Frog: 96 × 96 px viewBox, top-down view, mouth pointing right (rotation
-  applied at runtime).
-- Skull: 80 × 80 px viewBox, 5 frames covering open states (closed → fully open).
-- All SVGs use a consistent earthy palette (see §11.2).
-- No external fonts or linked resources inside SVGs (fully self-contained).
+No `SpriteSheet.ts`, no atlas JSON, no build script required.
 
 ---
 
@@ -1228,25 +1183,25 @@ interface Ball {
 
 #### Z-ordering
 
-Paths can double back on themselves, causing balls at different `pathT` values
-to overlap on screen. Each ball carries a `z` value that controls which ball
-renders on top. Z has no effect on game logic — only rendering.
+In full 3D, the WebGL depth buffer handles natural occlusion between objects
+in the scene. However, when a path doubles back on itself, two segments of the
+path are at the same world-space Y height and the depth buffer alone cannot
+determine which should appear on top — the author must specify this explicitly.
 
-**Rule: z is waypoint-driven.**
+**Rule: z is waypoint-driven and maps to world-space Y elevation.**
 
-Each waypoint in the level definition has a `z` value. When a ball's `pathT`
-crosses a waypoint, it adopts that waypoint's `z`. The ball holds that z until
-it crosses the next waypoint.
+Each waypoint has a `z` value (integer). `ball.z` is updated as the ball
+crosses waypoints. At render time `ChainRenderer` sets each ball mesh's
+`position.y` to `ball.z * LAYER_HEIGHT` (default `LAYER_HEIGHT = 0.5` units),
+physically elevating balls on higher-z segments above lower-z segments. The
+depth buffer then handles occlusion naturally — no `renderOrder` hacking needed.
 
-**Default z:** If the map author does not set a waypoint's z explicitly, it
-defaults to the waypoint's index (0, 1, 2, ...). This means later waypoints
-are higher by default — balls farther along the path render on top — which is
-correct for most non-looping paths without any author effort.
+**Default z:** Waypoint index (0, 1, 2, ...) — later waypoints are higher,
+correct for most paths with no author effort.
 
-**Map editor override:** The author can set any waypoint's z to any integer
-value. This is how paths that double back are handled — the author assigns a
-lower z to the waypoint at the start of the overlapping segment so the earlier
-pass renders beneath the later one.
+**Map editor override:** The author sets any waypoint's z to control layering
+on double-back paths — the earlier overlapping segment gets a lower z so it
+renders beneath the later pass.
 
 ```json
 {
@@ -1255,28 +1210,24 @@ pass renders beneath the later one.
       { "pos": [50, 300],  "z": 0 },
       { "pos": [350, 300], "z": 1 },
       { "pos": [200, 150], "z": 2 },
-      { "pos": [350, 300], "z": 0 },   // path doubles back — explicitly lower z
+      { "pos": [350, 300], "z": 0 },   // path doubles back — explicitly lower
       { "pos": [650, 300], "z": 1 }
     ]
   }
 }
 ```
 
-At render time, `ChainRenderer` sorts all balls by `z` ascending before
-submitting draw calls (lower z drawn first, higher z drawn on top):
-
 ```typescript
 // ChainRenderer.sync()
-const sorted = [...chain.balls].sort((a, b) => a.z - b.z);
-sorted.forEach((ball, i) => {
-  mesh.renderOrder = i;
+chain.balls.forEach(ball => {
+  const pos = PathSystem.positionAt(path, ball.pathT);
+  mesh.position.set(pos.x, ball.z * LAYER_HEIGHT, pos.y);
+  // depth buffer handles which ball appears on top
 });
 ```
 
-**Ball z is updated each tick** by `BallChain.update()` — after moving each
-ball, check whether it has crossed into the next waypoint's segment and update
-`ball.z` if so.
-```
+**Ball z is updated each tick** by `BallChain.update()` when a ball crosses
+a waypoint boundary. Z only affects rendering — no impact on game logic.
 
 #### Push-from-back movement
 
@@ -1712,7 +1663,7 @@ await expect(page.locator("#game-root")).toHaveAttribute("data-lives", "2");
 coverage: {
   provider: "v8",
   include: ["src/logic/**", "src/utils/**"],
-  exclude: ["src/renderer/**", "src/debug/**", "src/sprites/**"],
+  exclude: ["src/renderer/**", "src/debug/**"],
   thresholds: {
     lines: 90,
     branches: 90,
@@ -1802,24 +1753,22 @@ guard — the `debug/` modules tree-shake out entirely in production builds.
 
 ## 16. Milestones
 
-| Milestone | Deliverables |
-|---|---|
-**MVP goal: one fully playable level with complete gameplay mechanics and polished art.**
+**MVP goal: one fully playable level with complete gameplay mechanics and polished 3D art.**
 Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced from M2 onward.
 
 | Milestone | Deliverables | MVP? |
 |---|---|---|
 | **M0 — Scaffold** | Vite + TypeScript + Three.js, orthographic scene, deterministic `GameLoop`, seeded `Random`, mouse + touch `InputManager`, Vitest + Playwright configured, CI coverage check | Yes |
-| **M1 — Art Assets** | All SVG assets (6 balls, 7 power-ups, frog, skull ×5, bg, UI icons); Three.js asset loading pipeline | Yes |
-| **M2 — Path & Chain** | `PathSystem` (Bézier, arc-length LUT) + unit tests; `BallChain` (movement, spawn, speed ramp) + unit tests; chain rendered in Three.js | Yes |
+| **M1 — 3D Assets** | `frog.glb`, `skull.glb` (5 open states), `temple-props.glb` authored/sourced; `THREE.GLTFLoader` asset pipeline; procedural `SphereGeometry` balls with PBR materials; `TubeGeometry` path channel; lighting rig (ambient + directional + hemisphere) | Yes |
+| **M2 — Path & Chain** | `PathSystem` (Bézier, arc-length LUT) + unit tests; `BallChain` (movement, spawn, speed ramp) + unit tests; chain rendered in Three.js with correct Z elevation | Yes |
 | **M3 — Shooter** | `FrogState` + unit tests; `ProjectileState` + unit tests; `CollisionSystem` + unit tests; frog mesh + aim rotation | Yes |
 | **M4 — Matching** | `MatchSystem` (3+ match, cascade) + unit tests; step-through integration tests for single-shot clear and cascade scenarios | Yes |
-| **M5 — Scoring & HUD** | `ScoreSystem` (all bonus types) + unit tests; HUD renderer (score, lives, Zuma bar) | Yes |
-| **M6 — Win/Lose** | `SkullState` + unit tests; skull animation; level-complete and game-over screens; life loss / retry flow + integration tests | Yes |
+| **M5 — Scoring & HUD** | `ScoreSystem` (all bonus types) + unit tests; HTML/CSS HUD overlay (score, lives, Zuma bar) | Yes |
+| **M6 — Win/Lose** | `SkullState` + unit tests; skull GLTF animation states; level-complete and game-over screens; life loss / retry flow + integration tests | Yes |
 | **M7 — Power-Ups** | `PowerUpSystem` (all 7 types) + unit tests; chain embedding; activation effects; integration tests for each power-up | Yes |
 | **M8 — Debug Mode** | `DebugOverlay`, `StepController`, `DebugConfig`; all debug controls functional; Playwright `debug.spec.ts` | Yes |
-| **M9 — E2E & Polish** | Full Playwright suite; particle effects; camera shake; responsive canvas; mobile QA; coverage report ≥ 90% confirmed | Yes |
-| **M10 — Map Editor** | Separate Vite entry point; waypoint placement; auto-smooth with chord-length clamping; manual handle override; frog + spawn point placement; live preview with debug panel; export/import JSON | Post-MVP |
+| **M9 — E2E & Polish** | Full Playwright suite; particle effects (`ParticleRenderer`); camera shake; responsive canvas; mobile QA; coverage report ≥ 90% confirmed | Yes |
+| **M10 — Map Editor** | Integrated `EditorScene` (main menu option, all builds); waypoint placement; auto-smooth with chord-length clamping; manual handle override; frog + spawn point placement; Z breakpoint editing; live 3D preview; IndexedDB storage; JSON export/import; URL-encoded sharing | Post-MVP |
 | **M11 — Multi-Level** | 13+ levels authored in map editor, stage progression, save state | Post-MVP |
 | **M12 — Game Modes** | Adventure mode, Gauntlet (Practice + Survival), rank system | Post-MVP |
 | **M13 — Audio** | BGM loop, SFX, Zuma vocal cue via Web Audio API | Post-MVP |
@@ -1828,8 +1777,9 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
 
 ## 17. Open Questions
 
-1. **Art assets:** SVG sprites authored in-project, rasterized to a spritesheet at
-   build time. All entities render via `SpriteSheet.draw()`. (Resolved.)
+1. **Art assets:** Full 3D — GLTF/GLB meshes for frog, skull, and props; procedural
+   `SphereGeometry` for balls; `TubeGeometry` for path channel; PBR materials
+   throughout. No sprite pipeline, no SVG rasterization. (Resolved — see §13.3.)
 
 2. **Mobile support priority:** Full touch support is in scope. Touch controls implemented in M0 (`InputManager`) and tested throughout. Three.js renders to a `<canvas>` element which works natively on mobile. (Resolved.)
 
@@ -1856,4 +1806,4 @@ Every milestone ships with passing unit tests. Coverage gate (≥90%) enforced f
    needed for core gameplay. Potential use cases if added later: projectile
    ricochets, particle debris on pop, environmental elements. Candidates if
    needed: Rapier (Rust/WASM, excellent perf) or Matter.js (pure JS, simpler).
-   Current plan: no physics engine. (To discuss.)
+   Current plan: no physics engine. (Resolved.)
